@@ -66,6 +66,7 @@ async function openaiReply(senderId, customerText) {
 
   const history = getHistory(senderId);
   history.push({ role: "user", content: customerText });
+  console.log("Incoming message:", { senderId, customerText });
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -104,8 +105,10 @@ async function openaiReply(senderId, customerText) {
 
   if (parsed.action === "REPLY" && parsed.message) {
     history.push({ role: "assistant", content: parsed.message });
+    console.log("AI reply:", { senderId, message: parsed.message });
   } else {
     history.push({ role: "assistant", content: "[HANDOFF_SILENT]" });
+    console.log("AI silent handoff:", { senderId, customerText, parsed });
   }
 
   if (history.length > 24) history.splice(0, history.length - 24);
@@ -172,6 +175,8 @@ async function handleMessagingEvent(event) {
     console.log("Non-text message, silent handoff:", senderId);
     return;
   }
+
+  console.log("Webhook received text:", { senderId, customerText });
 
   try {
     await senderAction(senderId, "typing_on");
@@ -260,4 +265,3 @@ server.listen(PORT, () => {
   console.log(`IVA Chatpage Bot running on port ${PORT}`);
   console.log(`Webhook path: /webhook`);
 });
-
