@@ -87,8 +87,29 @@ function normalizeText(text) {
     .trim();
 }
 
+function expandChatShortcuts(text) {
+  return ` ${text} `
+    .replace(/\bbn\b/g, " bao nhieu ")
+    .replace(/\bbnhieu\b/g, " bao nhieu ")
+    .replace(/\bdc\b/g, " duoc ")
+    .replace(/\bdc k\b/g, " duoc khong ")
+    .replace(/\bdc ko\b/g, " duoc khong ")
+    .replace(/\bđc\b/g, " duoc ")
+    .replace(/\bk\b/g, " khong ")
+    .replace(/\bko\b/g, " khong ")
+    .replace(/\bkh\b/g, " khong ")
+    .replace(/\bc\b/g, " co ")
+    .replace(/\bđc ko\b/g, " duoc khong ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function chatText(rawText) {
+  return expandChatShortcuts(normalizeText(rawText));
+}
+
 function detectPersona(rawText, state) {
-  const text = normalizeText(rawText);
+  const text = chatText(rawText);
   if (/\banh\b/.test(text)) state.persona = "anh";
   if (/\bchi\b/.test(text)) state.persona = "chị";
   if (/\bco\b/.test(text)) state.persona = "cô";
@@ -100,7 +121,7 @@ function subject(state) {
 }
 
 function detectPain(rawText) {
-  const text = normalizeText(rawText);
+  const text = chatText(rawText);
   if (/(co vai gay|vai gay|dau vai gay|te tay)/.test(text)) return "vai gáy";
   if (/(dau vai|vai\b)/.test(text)) return "vai";
   if (/(dau lung|lung|that lung|te chan|than kinh toa)/.test(text)) return "lưng";
@@ -111,7 +132,7 @@ function detectPain(rawText) {
 }
 
 function detectDisease(rawText) {
-  const text = normalizeText(rawText);
+  const text = chatText(rawText);
   if (/thoat vi/.test(text)) return "thoát vị đĩa đệm";
   if (/than kinh toa/.test(text)) return "đau thần kinh tọa";
   if (/thoai hoa/.test(text)) return "thoái hóa";
@@ -122,14 +143,14 @@ function detectDisease(rawText) {
 }
 
 function detectDuration(rawText) {
-  const text = normalizeText(rawText);
+  const text = chatText(rawText);
   if (/(hom qua|moi|gan day|vua bi|2 tuan|tuan|thang|nam|ngay)/.test(text)) return rawText.trim();
   if (/^\d+\s*(ngay|tuan|thang|nam)/.test(text)) return rawText.trim();
   return "";
 }
 
 function detectTrigger(rawText) {
-  const text = normalizeText(rawText);
+  const text = chatText(rawText);
   if (/(di moi dau|di lai|di dung)/.test(text)) return "đi lại đau";
   if (/(ngoi lau|ngoi)/.test(text)) return "ngồi lâu đau";
   if (/(van dong|choi the thao|be nang|tap|the thao)/.test(text)) return "vận động";
@@ -138,49 +159,60 @@ function detectTrigger(rawText) {
 }
 
 function detectRadiation(rawText) {
-  const text = normalizeText(rawText);
+  const text = chatText(rawText);
   if (/(te tay|lan xuong tay|moi tay|dau dau)/.test(text)) return "tay";
   if (/(te chan|lan xuong chan|lan xuong mong|moi chan)/.test(text)) return "chân";
-  if (/^(co|có|uh|ừ|u|vâng|vang|co em|có em)$/i.test(rawText.trim())) return "có";
-  if (/^(khong|không|k|ko|khong em|không em)$/i.test(rawText.trim())) return "không";
+  if (/^(co|uh|u|vang|da co|co em|vang em|da)$/i.test(text)) return "có";
+  if (/^(khong|k|ko|khong em|k em|ko em|khong a|k a|ko a|khong dau|khong co)$/i.test(text)) return "không";
   return "";
 }
 
 function detectTreatment(rawText) {
-  const text = normalizeText(rawText);
+  const text = chatText(rawText);
   if (/(chua|chưa)/.test(rawText) || /\bchua\b/.test(text)) return "chưa";
   if (/(co cham cuu|cham cuu|vat ly tri lieu|vltl|uong thuoc|da dieu tri|co di)/.test(text)) return rawText.trim();
   return "";
 }
 
+function detectYesNo(rawText) {
+  const text = chatText(rawText);
+  if (/^(co|uh|u|vang|da|co em|vang em|da co|co a|co anh|co chi)$/i.test(text)) return "có";
+  if (/^(khong|khong em|khong a|khong anh|khong chi|khong dau|khong co|chua|chua em)$/i.test(text)) return "không";
+  return "";
+}
+
 function isPriceQuestion(rawText) {
-  const text = normalizeText(rawText);
+  const text = chatText(rawText);
   return /(gia|phi|chi phi|bao nhieu|bn|bao tien|mac|dat)/.test(text);
 }
 
 function isTreatmentAbilityQuestion(rawText) {
-  const text = normalizeText(rawText);
+  const text = chatText(rawText);
   return /(co dieu tri|dieu tri duoc|tri duoc|ho tro dieu tri|co chua duoc)/.test(text);
 }
 
 function isAddressQuestion(rawText) {
-  const text = normalizeText(rawText);
-  return /^(dia chi|o dau|ben minh o dau|phong kham o dau)$/.test(text);
+  const text = chatText(rawText);
+  return /^(dia chi|dc|duoc chi|o dau|ben minh o dau|phong kham o dau)$/.test(text) || /(dia chi|o dau)/.test(text);
 }
 
 function isPing(rawText) {
-  const text = normalizeText(rawText);
+  const text = chatText(rawText);
   return /^(alo|hello|helo|em oi|e oi|co ai khong)$/.test(text);
 }
 
 function updateStateFromText(state, rawText) {
   detectPersona(rawText, state);
+  const yesNo = detectYesNo(rawText);
   const pain = detectPain(rawText);
   const disease = detectDisease(rawText);
   const duration = detectDuration(rawText);
   const trigger = detectTrigger(rawText);
   const radiation = detectRadiation(rawText);
   const treated = detectTreatment(rawText);
+
+  if (yesNo && state.lastQuestion === "radiation") state.radiation = yesNo;
+  if (yesNo && state.lastQuestion === "treated") state.treated = yesNo === "không" ? "chưa" : "có";
 
   if (pain) state.pain = pain;
   if (disease) state.disease = disease;
@@ -227,10 +259,10 @@ function askTrigger(state) {
 
 function askRadiation(state) {
   const s = subject(state);
-  if (state.pain === "lưng" || /thắt lưng|tọa|thoát vị/.test(state.disease)) {
+  if (state.pain === "lưng" || /thắt lưng|tọa/.test(state.disease)) {
     return reply(state, `Dạ ${s} có đau lan xuống mông, chân hoặc tê chân không ạ?`, "radiation");
   }
-  if (state.pain === "vai" || state.pain === "vai gáy") {
+  if (state.pain === "vai" || state.pain === "vai gáy" || /cổ/.test(state.disease)) {
     return reply(state, `Dạ ${s} có đau lan xuống tay hoặc tê tay không ạ?`, "radiation");
   }
   if (state.pain === "gối") return reply(state, `Dạ ${s} đi lại có bị đau nhói hoặc cứng khớp không ạ?`, "radiation");
