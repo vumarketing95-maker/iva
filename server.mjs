@@ -223,7 +223,7 @@ function detectDuration(rawText) {
 
 function detectTrigger(rawText) {
   const text = chatText(rawText);
-  if (/(di moi dau|di lai|di dung)/.test(text)) return "đi lại đau";
+  if (/(di moi dau|di lai|di dung|di la dau|di thay dau|di lai thay dau|di lai.*dau)/.test(text)) return "đi lại đau";
   if (/(ngoi lau|ngoi)/.test(text)) return "ngồi lâu đau";
   if (/(van dong|choi the thao|be nang|tap|the thao)/.test(text)) return "vận động";
   if (/(tu nhien|tu dung)/.test(text)) return "tự nhiên";
@@ -285,6 +285,31 @@ function updateStateFromText(state, rawText) {
 
   if (yesNo && state.lastQuestion === "radiation") state.radiation = yesNo;
   if (yesNo && state.lastQuestion === "treated") state.treated = yesNo === "không" ? "chưa" : "có";
+  if (!trigger && state.lastQuestion === "trigger" && /dau/.test(chatText(rawText))) {
+    if (/di/.test(chatText(rawText))) state.trigger = "đi lại đau";
+    if (/ngoi/.test(chatText(rawText))) state.trigger = "ngồi lâu đau";
+    if (/tu nhien/.test(chatText(rawText))) state.trigger = "tự nhiên";
+  }
+
+  if (pain && state.pain && pain !== state.pain) {
+    state.duration = "";
+    state.trigger = "";
+    state.radiation = "";
+    state.treated = "";
+    state.askedPrice = false;
+    state.lastQuestion = "";
+    state.assessed = false;
+  }
+
+  if (disease && state.disease && disease !== state.disease) {
+    state.duration = "";
+    state.trigger = "";
+    state.radiation = "";
+    state.treated = "";
+    state.askedPrice = false;
+    state.lastQuestion = "";
+    state.assessed = false;
+  }
 
   if (pain) state.pain = pain;
   if (disease) state.disease = disease;
@@ -314,14 +339,16 @@ function priceReply(state) {
 }
 
 function askDuration(state) {
+  if (state.lastQuestion === "duration") return { action: "HANDOFF", message: "" };
   const s = subject(state);
   if (state.disease) return reply(state, `Dạ ${s} bị tình trạng này bao lâu rồi ạ?`, "duration");
   return reply(state, `Dạ tình trạng đau ${state.pain || "này"} của ${s} kéo dài bao lâu rồi ạ?`, "duration");
 }
 
 function askTrigger(state) {
+  if (state.lastQuestion === "trigger") return askRadiation(state);
   const s = subject(state);
-  if (state.pain === "lưng") return reply(state, `Dạ ${s} đau tăng khi đi lại hay ngồi lâu ạ?`, "trigger");
+  if (state.pain === "lưng") return reply(state, `Dạ ${s} đau tăng khi đi lại, ngồi lâu hay tự nhiên đau ạ?`, "trigger");
   if (state.pain === "vai" || state.pain === "vai gáy") {
     return reply(state, `Dạ ${s} đau sau vận động hay tự nhiên đau ạ?`, "trigger");
   }
@@ -330,8 +357,9 @@ function askTrigger(state) {
 }
 
 function askRadiation(state) {
+  if (state.lastQuestion === "radiation") return assessmentReply(state);
   const s = subject(state);
-  if (state.pain === "lưng" || /thắt lưng|tọa/.test(state.disease)) {
+  if (state.pain === "lưng" || /thắt lưng|tọa|thoát vị đĩa đệm/.test(state.disease)) {
     return reply(state, `Dạ ${s} có đau lan xuống mông, chân hoặc tê chân không ạ?`, "radiation");
   }
   if (state.pain === "vai" || state.pain === "vai gáy" || /cổ/.test(state.disease)) {
