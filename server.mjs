@@ -42,6 +42,78 @@ function text(res, status, payload) {
   res.end(payload);
 }
 
+function html(res, status, payload) {
+  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(payload);
+}
+
+const privacyPolicyHtml = `<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chính sách quyền riêng tư - Phòng khám PHCN IVA</title>
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 880px; margin: 40px auto; padding: 0 18px; color: #1f2937; }
+    h1, h2 { color: #0f172a; }
+    h1 { font-size: 30px; }
+    h2 { margin-top: 28px; font-size: 20px; }
+    ul { padding-left: 22px; }
+  </style>
+</head>
+<body>
+  <h1>Chính sách quyền riêng tư và xóa dữ liệu người dùng</h1>
+  <p><strong>Phòng khám Phục hồi chức năng IVA</strong></p>
+
+  <p>Phòng khám Phục hồi chức năng IVA tôn trọng quyền riêng tư của khách hàng khi tương tác với Fanpage và các kênh tư vấn trực tuyến của phòng khám.</p>
+
+  <h2>1. Thông tin chúng tôi thu thập</h2>
+  <p>Khi khách hàng nhắn tin qua Fanpage, chúng tôi có thể tiếp nhận các thông tin do khách hàng chủ động cung cấp, bao gồm:</p>
+  <ul>
+    <li>Họ tên</li>
+    <li>Số điện thoại</li>
+    <li>Nội dung tin nhắn tư vấn</li>
+    <li>Tình trạng cơ xương khớp khách hàng chia sẻ</li>
+    <li>Nhu cầu đặt lịch khám hoặc tư vấn</li>
+    <li>Thời gian và cơ sở khách hàng muốn đến</li>
+  </ul>
+  <p>Chúng tôi không yêu cầu khách hàng cung cấp thông tin nhạy cảm không cần thiết qua tin nhắn.</p>
+
+  <h2>2. Mục đích sử dụng thông tin</h2>
+  <p>Thông tin khách hàng được sử dụng để:</p>
+  <ul>
+    <li>Tư vấn tình trạng ban đầu</li>
+    <li>Hỗ trợ đặt lịch khám</li>
+    <li>Chăm sóc khách hàng</li>
+    <li>Xác nhận lịch hẹn</li>
+    <li>Cải thiện chất lượng tư vấn và dịch vụ</li>
+  </ul>
+
+  <h2>3. Chia sẻ dữ liệu</h2>
+  <p>IVA không bán, trao đổi hoặc chia sẻ thông tin cá nhân của khách hàng cho bên thứ ba vì mục đích thương mại.</p>
+  <p>Thông tin chỉ được sử dụng nội bộ trong phạm vi phòng khám hoặc các hệ thống hỗ trợ vận hành tư vấn, đặt lịch và chăm sóc khách hàng.</p>
+
+  <h2>4. Lưu trữ và bảo mật</h2>
+  <p>Chúng tôi áp dụng các biện pháp phù hợp để bảo vệ thông tin khách hàng khỏi truy cập trái phép, mất mát hoặc sử dụng sai mục đích.</p>
+
+  <h2>5. Yêu cầu xóa dữ liệu người dùng</h2>
+  <p>Khách hàng có thể yêu cầu xóa dữ liệu đã cung cấp bằng một trong các cách sau:</p>
+  <ul>
+    <li>Nhắn tin trực tiếp vào Fanpage Phòng khám Phục hồi chức năng IVA với nội dung: “Yêu cầu xóa dữ liệu”</li>
+    <li>Gọi hoặc nhắn tin cho phòng khám để yêu cầu hỗ trợ</li>
+  </ul>
+  <p>Sau khi tiếp nhận yêu cầu, IVA sẽ kiểm tra và thực hiện xóa hoặc ẩn thông tin liên quan trong phạm vi hệ thống quản lý của phòng khám.</p>
+
+  <h2>6. Thông tin liên hệ</h2>
+  <p><strong>Phòng khám Phục hồi chức năng IVA</strong></p>
+  <ul>
+    <li>CN1: 33N Hoàng Quốc Việt, Tân Mỹ, TP.HCM</li>
+    <li>CN2: 94 Đường 56, Bình Trưng, TP.HCM</li>
+  </ul>
+  <p>Nếu cần hỗ trợ về quyền riêng tư hoặc xóa dữ liệu, khách hàng vui lòng liên hệ Fanpage chính thức của phòng khám.</p>
+</body>
+</html>`;
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -535,7 +607,13 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         service: "IVA Chatpage Bot",
         webhook: "/webhook",
+        privacy: "/privacy-policy",
+        dataDeletion: "/data-deletion",
       });
+    }
+
+    if (req.method === "GET" && (url.pathname === "/privacy-policy" || url.pathname === "/data-deletion")) {
+      return html(res, 200, privacyPolicyHtml);
     }
 
     if (req.method === "GET" && url.pathname === "/webhook") {
