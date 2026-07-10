@@ -143,6 +143,9 @@ function getCustomerState(senderId) {
       stage: "new",
       leadGroup: "unknown",
       temperature: "cold",
+      nextGoal: "discover_need",
+      areaHint: "",
+      preferredBranch: "",
       lastQuestion: "",
       askedFields: new Set(),
       assessmentSent: false,
@@ -262,12 +265,45 @@ function isAddressQuestion(rawText) {
 function isBookingIntent(rawText) {
   const text = chatText(rawText);
   if (/(moi hom nay|hom nay moi|vua hom nay)/.test(text)) return false;
-  return /(hom nay|ngay mai|mai toi qua|mai qua|may gio|lich may gio|co lich khong|co lich may gio|dat lich|giu lich|lich nhu the nao|qua duoc|qua dc|qua duoc khong|qua kham|toi qua duoc khong|binh trung|hoang quoc viet)/.test(text);
+  return /(hom nay|ngay mai|mai toi qua|mai qua|may gio|lich may gio|co lich khong|co lich may gio|dat lich|giu lich|lich nhu the nao|qua duoc|qua dc|qua duoc khong|qua kham|toi qua duoc khong)/.test(text);
 }
 
 function isBranchChoice(rawText) {
   const text = chatText(rawText);
-  return /(binh trung|hoang quoc viet|quan 7|tan my|duong 56)/.test(text);
+  return /(binh trung|hoang quoc viet|quan 7|q7|tan my|duong 56|quan 9|q9|thu duc|tp thu duc|quan 2|q2|cat lai|an phu)/.test(text);
+}
+
+function inferBranchFromText(rawText) {
+  const text = chatText(rawText);
+  if (/(binh trung|duong 56|quan 9|q9|thu duc|tp thu duc|quan 2|q2|cat lai|an phu)/.test(text)) {
+    return "Bình Trưng";
+  }
+  if (/(hoang quoc viet|quan 7|q7|tan my|nha be|phu my hung|nguyen thi thap)/.test(text)) {
+    return "Hoàng Quốc Việt";
+  }
+  return "";
+}
+
+function detectAreaHint(rawText) {
+  const text = chatText(rawText);
+
+  if (/(quan 9|q9|thu duc|tp thu duc|binh trung|an phu|cat lai|quan 2|q2)/.test(text)) {
+    return { area: rawText.trim(), branch: "Bình Trưng" };
+  }
+
+  if (/(quan 7|q7|tan my|nha be|phu my hung|nguyen thi thap)/.test(text)) {
+    return { area: rawText.trim(), branch: "Hoàng Quốc Việt" };
+  }
+
+  if (/(go vap|binh thanh|tan binh|phu nhuan|quan 1|q1|quan 3|q3|quan 10|q10)/.test(text)) {
+    return { area: rawText.trim(), branch: "" };
+  }
+
+  if (/(xa qua|xa khong|gan khong|gan cho nao)/.test(text)) {
+    return { area: rawText.trim(), branch: "" };
+  }
+
+  return null;
 }
 
 function isSpecificDiseaseQuestion(rawText) {
@@ -336,6 +372,40 @@ function classifyLead(state) {
   else if (state.disease) state.leadGroup = "known_disease";
   else if (state.pain) state.leadGroup = strongerSignal ? "likely_pathology" : "symptom_unknown";
   else state.leadGroup = "unknown";
+
+  if (state.hasPhone) state.nextGoal = "confirm_branch";
+  else if (state.wantsBooking || state.priceSent) state.nextGoal = "book_appointment";
+  else if (state.askedPrice && !hasEnoughForPrice(state)) state.nextGoal = "collect_missing_before_price";
+  else if (state.askedPrice && hasEnoughForPrice(state)) state.nextGoal = "present_offer";
+  else if (state.assessmentSent) state.nextGoal = "move_to_price_or_booking";
+  else if (hasSignal) state.nextGoal = "complete_assessment";
+  else state.nextGoal = "discover_need";
+}
+
+function areaReply(state) {
+  state.stage = "area_routing";
+  const s = subject(state);
+
+  if (state.preferredBranch) {
+    return result(state, `Dạ vậy ${s} tiện cơ sở ${state.preferredBranch} hơn ạ. ${capitalizeFirst(s)} đang cần kiểm tra đau/mỏi phần nào ạ?`, "problem");
+  }
+
+  return result(state, `${CLINIC.address} Mình tiện cơ sở Hoàng Quốc Việt hay Bình Trưng hơn ạ?`, "branch_distance");
+}
+
+function branchChoiceReply(state, rawText = "") {
+  const branch = inferBranchFromText(rawText) || state.preferredBranch;
+  if (branch) state.preferredBranch = branch;
+  const s = subject(state);
+
+  if (state.bookingAsked || state.wantsBooking || state.priceSent || state.assessmentSent) {
+    state.bookingAsked = true;
+    state.stage = "booking_phone";
+    return result(state, `Dạ ${branch ? `${s} tiện cơ sở ${branch} ạ. ` : ""}${capitalizeFirst(s)} cho em xin tên và SĐT để em giữ lịch cho mình ạ?`, "phone");
+  }
+
+  state.stage = "branch_selected";
+  return result(state, `Dạ vậy ${s} tiện cơ sở ${branch || "này"} hơn ạ. ${capitalizeFirst(s)} đang cần hỗ trợ đau/mỏi phần nào ạ?`, "problem");
 }
 
 function updateStateFromText(state, rawText) {
@@ -373,6 +443,11 @@ function updateStateFromText(state, rawText) {
   if (isAddressQuestion(rawText)) state.askedAddress = true;
   if (isBookingIntent(rawText)) state.wantsBooking = true;
   if (hasPhoneNumber(rawText)) state.hasPhone = true;
+  const areaHint = detectAreaHint(rawText);
+  if (areaHint) {
+    state.areaHint = areaHint.area;
+    if (areaHint.branch) state.preferredBranch = areaHint.branch;
+  }
 
   const objection = detectObjection(rawText);
   if (objection) state.objection = objection;
@@ -387,6 +462,13 @@ function result(state, message, lastQuestion = "") {
   return { action: "REPLY", message: clean };
 }
 
+function multiResult(state, messages, lastQuestion = "") {
+  const cleanMessages = messages.map((message) => alignPronouns(state, message).trim()).filter(Boolean);
+  state.lastQuestion = lastQuestion;
+  if (lastQuestion) state.askedFields.add(lastQuestion);
+  return { action: "REPLY", messages: cleanMessages, message: cleanMessages.join("\n") };
+}
+
 function handoff(reason = "") {
   if (reason) console.log("Silent handoff reason:", reason);
   return { action: "HANDOFF", message: "" };
@@ -394,7 +476,7 @@ function handoff(reason = "") {
 
 function askProblem(state) {
   state.stage = "asking_problem";
-  return result(state, "Dạ mình đang đau phần nào ạ?", "problem");
+  return result(state, "Dạ mình đang cần hỗ trợ đau/mỏi phần nào ạ?", "problem");
 }
 
 function askDuration(state) {
@@ -482,10 +564,12 @@ function priceReply(state) {
   if (!state.assessmentSent) {
     state.assessmentSent = true;
     const likely = diseaseLabel(state);
-    const prefix = likely ? `Dạ dấu hiệu này có thể nghiêng về ${likely}. ` : "";
     state.priceSent = true;
     state.stage = "price_presented";
-    return result(state, `${prefix}${CLINIC.price} ${CLINIC.priceClose}`);
+    const messages = [];
+    if (likely) messages.push(`Dạ dấu hiệu này có thể nghiêng về ${likely}. ${subject(state)} nên qua để bác sĩ kiểm tra kỹ hơn ạ.`);
+    messages.push(`${CLINIC.price} ${CLINIC.priceClose}`);
+    return multiResult(state, messages);
   }
   if (state.priceSent) return bookingReply(state);
   state.priceSent = true;
@@ -501,7 +585,7 @@ function priceNeedInfoReply(state) {
     if (state.sentQuestionKeys.has("ask_price_problem") || state.sentQuestionKeys.has("ask_problem_location")) {
       return result(state, "Dạ em cần nắm vùng mình đang đau trước rồi mới báo đúng ưu đãi được ạ.");
     }
-    return result(state, "Dạ để em báo đúng phần ưu đãi, mình đang đau phần nào ạ?", "price_problem");
+    return result(state, "Dạ để em báo đúng phần ưu đãi, mình đang đau/mỏi phần nào ạ?", "price_problem");
   }
 
   if (state.disease && !state.treated) {
@@ -559,13 +643,16 @@ function priceAndAddressReply(state) {
   state.stage = "price_and_address_sent";
   if (!hasEnoughForPrice(state)) {
     const question = nextQuestionTextBeforePrice(state);
-    return result(state, `${CLINIC.address} ${question}`, messageQuestionKey(question) || "price_followup");
+    return multiResult(state, [CLINIC.address, question], messageQuestionKey(question) || "price_followup");
   }
   state.priceSent = true;
   const likely = !state.assessmentSent ? diseaseLabel(state) : "";
   state.assessmentSent = true;
-  const prefix = likely ? `Dạ dấu hiệu này có thể nghiêng về ${likely}. ` : "";
-  return result(state, `${prefix}${CLINIC.price}\n${CLINIC.address}`);
+  const messages = [];
+  if (likely) messages.push(`Dạ dấu hiệu này có thể nghiêng về ${likely}. ${subject(state)} nên qua để bác sĩ kiểm tra kỹ hơn ạ.`);
+  messages.push(CLINIC.price);
+  messages.push(CLINIC.address);
+  return multiResult(state, messages);
 }
 
 function priceAndBookingReply(state, rawText = "") {
@@ -578,7 +665,7 @@ function priceAndBookingReply(state, rawText = "") {
 
   const text = chatText(rawText);
   const day = /ngay mai|mai/.test(text) ? "mai" : "hôm nay";
-  return result(state, `${CLINIC.price} Dạ ${day} mình qua được ạ. Mình tiện Hoàng Quốc Việt hay Bình Trưng?`);
+  return multiResult(state, [CLINIC.price, `Dạ ${day} mình qua được ạ. Mình tiện Hoàng Quốc Việt hay Bình Trưng?`], "ask_branch");
 }
 
 function addressAndBookingReply(state, rawText = "") {
@@ -587,7 +674,7 @@ function addressAndBookingReply(state, rawText = "") {
   state.stage = "address_then_booking";
   const text = chatText(rawText);
   const day = /ngay mai|mai/.test(text) ? "mai" : "hôm nay";
-  return result(state, `${CLINIC.address} Dạ ${day} mình qua được ạ. Mình tiện Hoàng Quốc Việt hay Bình Trưng?`);
+  return multiResult(state, [CLINIC.address, `Dạ ${day} mình qua được ạ. Mình tiện Hoàng Quốc Việt hay Bình Trưng?`], "ask_branch");
 }
 
 function hasEnoughForPrice(state) {
@@ -617,7 +704,7 @@ function nextClinicalQuestionBeforePrice(state) {
 
 function nextQuestionTextBeforePrice(state) {
   const s = subject(state);
-  if (!state.pain && !state.disease) return "Mình đang đau phần nào ạ?";
+  if (!state.pain && !state.disease) return "Mình đang cần hỗ trợ đau/mỏi phần nào ạ?";
   if (state.disease && !state.treated) return `${capitalizeFirst(s)} đã điều trị phương pháp nào chưa ạ?`;
   if (!state.duration) {
     if (state.disease) return `${capitalizeFirst(s)} bị lâu chưa ạ?`;
@@ -639,9 +726,16 @@ function addressReply(state) {
   state.addressSent = true;
   state.stage = "address_sent";
   if (state.assessmentSent || state.wantsBooking || state.priceSent) {
-    return result(state, `${CLINIC.address} ${CLINIC.addressAsk}`);
+    return multiResult(state, [CLINIC.address, CLINIC.addressAsk], "ask_branch");
   }
-  return result(state, `${CLINIC.address} Mình đang đau phần nào ạ?`, "problem");
+  return multiResult(
+    state,
+    [
+      CLINIC.address,
+      "Mình gần cơ sở Hoàng Quốc Việt hay Bình Trưng hơn ạ?",
+    ],
+    "branch_distance",
+  );
 }
 
 function bookingReply(state, rawText = "") {
@@ -690,13 +784,28 @@ function handleDeterministicFlow(senderId, customerText) {
   const state = getCustomerState(senderId);
   state.messageCount += 1;
   updateStateFromText(state, customerText);
+  const currentPain = detectPain(customerText);
+  const currentDisease = detectDisease(customerText);
+  const currentArea = detectAreaHint(customerText);
 
   if (isOutOfScopeQuestion(customerText)) return handoff("out of scope needs human");
   if (hasPhoneNumber(customerText)) return bookingReply(state, customerText);
+  if (
+    isBranchChoice(customerText) &&
+    !currentPain &&
+    !currentDisease &&
+    !isPriceQuestion(customerText) &&
+    !isAddressQuestion(customerText) &&
+    (!isBookingIntent(customerText) || state.bookingAsked || state.wantsBooking || state.priceSent || state.assessmentSent)
+  ) {
+    return branchChoiceReply(state, customerText);
+  }
+  if (currentArea && !currentPain && !currentDisease && !isPriceQuestion(customerText) && !isBookingIntent(customerText)) {
+    return areaReply(state);
+  }
   if (isPriceQuestion(customerText) && isBookingIntent(customerText)) return priceAndBookingReply(state, customerText);
   if (isPriceQuestion(customerText) && isAddressQuestion(customerText)) return priceAndAddressReply(state);
   if (isAddressQuestion(customerText) && isBookingIntent(customerText)) return addressAndBookingReply(state, customerText);
-  if (isBranchChoice(customerText) && state.bookingAsked) return bookingReply(state, customerText);
   if (isBookingIntent(customerText)) return bookingReply(state, customerText);
   if (isAddressQuestion(customerText)) return addressReply(state);
   if (isSpecificDiseaseQuestion(customerText)) return specificDiseaseReply(state);
@@ -725,8 +834,22 @@ function handleDeterministicFlow(senderId, customerText) {
 }
 
 function responseGuard(state, ai) {
-  if (!ai || ai.action !== "REPLY" || !ai.message) return ai;
-  const message = ai.message.trim();
+  if (!ai || ai.action !== "REPLY") return ai;
+  const messages = Array.isArray(ai.messages) ? ai.messages : [ai.message].filter(Boolean);
+  if (!messages.length) return handoff("empty reply");
+
+  const guardedMessages = [];
+  for (const rawMessage of messages) {
+    const guarded = responseGuardSingle(state, rawMessage);
+    if (guarded.action !== "REPLY" || !guarded.message) return guarded;
+    guardedMessages.push(guarded.message);
+  }
+
+  return { action: "REPLY", messages: guardedMessages, message: guardedMessages.join("\n") };
+}
+
+function responseGuardSingle(state, rawMessage) {
+  const message = rawMessage.trim();
   const textValue = normalizeText(message);
   const lastText = normalizeText(state.lastBotMessage || "");
   const questionKey = messageQuestionKey(message);
@@ -756,6 +879,7 @@ function messageQuestionKey(message) {
   const textValue = normalizeText(message);
   if (/dau o vung nao|dang dau o vung nao|vi tri nao|dau o dau/.test(textValue)) return "ask_problem_location";
   if (/dang dau phan nao|dau phan nao/.test(textValue)) return "ask_problem_location";
+  if (/dau moi phan nao|can ho tro dau moi/.test(textValue)) return "ask_problem_location";
   if (/bao dung phan uu dai|bao dung uu dai/.test(textValue)) return "ask_price_problem";
   if (/bao lau|lau chua|keo dai/.test(textValue)) return "ask_duration";
   if (/bi lau chua|dau .* lau chua/.test(textValue)) return "ask_duration";
@@ -764,7 +888,8 @@ function messageQuestionKey(message) {
   if (/lan xuong tay|te tay/.test(textValue)) return "ask_arm_radiation";
   if (/lan xuong mong|lan xuong chan|te chan/.test(textValue)) return "ask_leg_radiation";
   if (/dieu tri phuong phap nao|da dieu tri|da di dieu tri/.test(textValue)) return "ask_treatment";
-  if (/co so hoang quoc viet hay binh trung|tien co so nao/.test(textValue)) return "ask_branch";
+  if (/co so hoang quoc viet hay binh trung|hoang quoc viet hay binh trung|tien co so nao|tien hoang quoc viet hay binh trung/.test(textValue)) return "ask_branch";
+  if (/gan co so nao/.test(textValue)) return "ask_branch";
   if (/xin ten va sdt|cho em xin ten|so dien thoai/.test(textValue)) return "ask_phone";
   return "";
 }
@@ -799,7 +924,10 @@ function logLeadSignal(senderId, state, customerText, botMessage = "") {
     botMessage,
     group: state.leadGroup,
     temperature: state.temperature,
+    nextGoal: state.nextGoal,
     stage: state.stage,
+    areaHint: state.areaHint,
+    preferredBranch: state.preferredBranch,
     pain: state.pain,
     disease: state.disease,
     duration: state.duration,
@@ -931,12 +1059,15 @@ async function handleMessagingEvent(event) {
       return;
     }
 
-    await delay(naturalDelay(guarded.message));
-    await sendMessage(senderId, guarded.message);
-    state.lastBotMessage = guarded.message;
-    const sentQuestionKey = messageQuestionKey(guarded.message);
-    if (sentQuestionKey) state.sentQuestionKeys.add(sentQuestionKey);
-    logLeadSignal(senderId, state, customerText, guarded.message);
+    const messagesToSend = Array.isArray(guarded.messages) ? guarded.messages : [guarded.message];
+    for (const outgoingMessage of messagesToSend) {
+      await delay(naturalDelay(outgoingMessage));
+      await sendMessage(senderId, outgoingMessage);
+      state.lastBotMessage = outgoingMessage;
+      const sentQuestionKey = messageQuestionKey(outgoingMessage);
+      if (sentQuestionKey) state.sentQuestionKeys.add(sentQuestionKey);
+    }
+    logLeadSignal(senderId, state, customerText, messagesToSend.join(" | "));
   } catch (error) {
     console.error("Message handling error:", error);
   } finally {
