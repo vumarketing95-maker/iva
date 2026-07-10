@@ -5,6 +5,7 @@ import { IVA_SYSTEM_PROMPT, DEFAULT_HISTORY } from "./iva_rules.mjs";
 const PORT = Number(process.env.PORT || 3000);
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "iva_verify_2026";
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "";
+const PAGE_TOKENS_RAW = process.env.PAGE_TOKENS || "";
 const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || "v25.0";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
@@ -14,6 +15,33 @@ const MAX_REPLY_DELAY_MS = Number(process.env.MAX_REPLY_DELAY_MS || 6500);
 const conversations = new Map();
 const customerStates = new Map();
 const processedMessageIds = new Set();
+
+function parsePageTokens(rawValue) {
+  if (!rawValue) return {};
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .map(([pageId, token]) => [String(pageId).trim(), String(token).trim()])
+        .filter(([pageId, token]) => pageId && token),
+    );
+  } catch (error) {
+    console.error("Invalid PAGE_TOKENS JSON. Use format: {\"PAGE_ID\":\"PAGE_TOKEN\"}");
+    return {};
+  }
+}
+
+const PAGE_TOKENS = parsePageTokens(PAGE_TOKENS_RAW);
+
+function tokenForPage(pageId = "") {
+  const pageToken = pageId ? PAGE_TOKENS[String(pageId)] : "";
+  return pageToken || PAGE_ACCESS_TOKEN;
+}
+
+function conversationKey(pageId, senderId) {
+  return `${pageId || "default"}:${senderId}`;
+}
 
 const CLINIC = {
   address:
@@ -993,13 +1021,14 @@ async function openaiReply(senderId, customerText) {
   return parsed;
 }
 
-async function graphApi(path, body) {
-  if (!PAGE_ACCESS_TOKEN) {
-    console.error("Missing PAGE_ACCESS_TOKEN");
+async function graphApi(path, body, pageId = "") {
+  const accessToken = tokenForPage(pageId);
+  if (!accessToken) {
+    console.error("Missing page token", { pageId });
     return;
   }
 
-  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${path}?access_token=${encodeURIComponent(PAGE_ACCESS_TOKEN)}`;
+  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${path}?access_token=${encodeURIComponent(accessToken)}`;
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1009,19 +1038,19 @@ async function graphApi(path, body) {
   if (!response.ok) console.error("Graph API error", response.status, await response.text());
 }
 
-async function senderAction(recipientId, action) {
+async function senderAction(recipientId, action, pageId = "") {
   await graphApi("me/messages", {
     recipient: { id: recipientId },
     sender_action: action,
-  });
+  }, pageId);
 }
 
-async function sendMessage(recipientId, message) {
+async function sendMessage(recipientId, message, pageId = "") {
   await graphApi("me/messages", {
     recipient: { id: recipientId },
     messaging_type: "RESPONSE",
     message: { text: message },
-  });
+  }, pageId);
 }
 
 function isDuplicate(messageId) {
@@ -1037,6 +1066,7 @@ function isDuplicate(messageId) {
 
 async function handleMessagingEvent(event) {
   const senderId = event.sender?.id;
+  const pageId = event.recipient?.id || "";
   const message = event.message;
 
   if (!senderId || !message) return;
@@ -1047,31 +1077,32 @@ async function handleMessagingEvent(event) {
   if (!customerText) return;
 
   try {
-    await senderAction(senderId, "typing_on");
-    const deterministic = handleDeterministicFlow(senderId, customerText);
-    const state = getCustomerState(senderId);
+    const chatKey = conversationKey(pageId, senderId);
+    await senderAction(senderId, "typing_on", pageId);
+    const deterministic = handleDeterministicFlow(chatKey, customerText);
+    const state = getCustomerState(chatKey);
     const rawReply = deterministic || handoff("no controlled rule matched");
     const guarded = responseGuard(state, rawReply);
 
     if (guarded.action !== "REPLY" || !guarded.message) {
-      logLeadSignal(senderId, state, customerText, "");
-      await senderAction(senderId, "typing_off");
+      logLeadSignal(chatKey, state, customerText, "");
+      await senderAction(senderId, "typing_off", pageId);
       return;
     }
 
     const messagesToSend = Array.isArray(guarded.messages) ? guarded.messages : [guarded.message];
     for (const outgoingMessage of messagesToSend) {
       await delay(naturalDelay(outgoingMessage));
-      await sendMessage(senderId, outgoingMessage);
+      await sendMessage(senderId, outgoingMessage, pageId);
       state.lastBotMessage = outgoingMessage;
       const sentQuestionKey = messageQuestionKey(outgoingMessage);
       if (sentQuestionKey) state.sentQuestionKeys.add(sentQuestionKey);
     }
-    logLeadSignal(senderId, state, customerText, messagesToSend.join(" | "));
+    logLeadSignal(chatKey, state, customerText, messagesToSend.join(" | "));
   } catch (error) {
     console.error("Message handling error:", error);
   } finally {
-    await senderAction(senderId, "typing_off");
+    await senderAction(senderId, "typing_off", pageId);
   }
 }
 
