@@ -5,7 +5,7 @@ import { IVA_SYSTEM_PROMPT, DEFAULT_HISTORY } from "./iva_rules.mjs";
 const PORT = Number(process.env.PORT || 3000);
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "iva_verify_2026";
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "";
-const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || "v23.0";
+const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || "v25.0";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const MIN_REPLY_DELAY_MS = Number(process.env.MIN_REPLY_DELAY_MS || 2500);
@@ -15,13 +15,15 @@ const conversations = new Map();
 const customerStates = new Map();
 const processedMessageIds = new Set();
 
-const approvedTemplates = {
+const CLINIC = {
   address:
-    "Dạ IVA có 2 cơ sở: 33N Hoàng Quốc Việt, Tân Mỹ và 94 Đường 56, Bình Trưng ạ. Mình đang cần hỗ trợ tình trạng gì ạ?",
-  askProblemForPrice: "Dạ mình đang đau ở vị trí nào để em tư vấn phù hợp hơn ạ?",
+    "Dạ IVA có 2 cơ sở: 33N Hoàng Quốc Việt, Tân Mỹ và 94 Đường 56, Bình Trưng ạ.",
+  addressAsk: "Mình tiện cơ sở nào để em giữ lịch cho mình?",
   price:
-    "Sau khi khám bác sĩ sẽ trao đổi kỹ lộ trình và chi phí cho mình ạ. Đặt lịch online bên em đang có ưu đãi 499k/5 buổi trị liệu bấm huyệt, mình tiện qua hôm nay hay ngày mai ạ?",
-  busy: "Dạ không sao ạ, khi nào mình sắp xếp được em giữ ưu đãi phù hợp cho mình nhé.",
+    "Sau khi khám bác sĩ sẽ trao đổi kỹ lộ trình và chi phí cho mình ạ. Đặt lịch online bên em đang có ưu đãi 499k/5 buổi trị liệu bấm huyệt.",
+  priceClose: "Mình tiện qua hôm nay hay ngày mai ạ?",
+  methods:
+    "Bên em hỗ trợ bằng vật lý trị liệu, có kết hợp máy như kéo giãn cột sống, sóng từ trường, điện xung, siêu âm tuỳ tình trạng sau khi bác sĩ kiểm tra ạ.",
 };
 
 function readJson(req) {
@@ -65,61 +67,21 @@ const privacyPolicyHtml = `<!doctype html>
   <style>
     body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 880px; margin: 40px auto; padding: 0 18px; color: #1f2937; }
     h1, h2 { color: #0f172a; }
-    h1 { font-size: 30px; }
-    h2 { margin-top: 28px; font-size: 20px; }
-    ul { padding-left: 22px; }
   </style>
 </head>
 <body>
   <h1>Chính sách quyền riêng tư và xóa dữ liệu người dùng</h1>
   <p><strong>Phòng khám Phục hồi chức năng IVA</strong></p>
-
-  <p>Phòng khám Phục hồi chức năng IVA tôn trọng quyền riêng tư của khách hàng khi tương tác với Fanpage và các kênh tư vấn trực tuyến của phòng khám.</p>
-
-  <h2>1. Thông tin chúng tôi thu thập</h2>
-  <p>Khi khách hàng nhắn tin qua Fanpage, chúng tôi có thể tiếp nhận các thông tin do khách hàng chủ động cung cấp, bao gồm:</p>
-  <ul>
-    <li>Họ tên</li>
-    <li>Số điện thoại</li>
-    <li>Nội dung tin nhắn tư vấn</li>
-    <li>Tình trạng cơ xương khớp khách hàng chia sẻ</li>
-    <li>Nhu cầu đặt lịch khám hoặc tư vấn</li>
-    <li>Thời gian và cơ sở khách hàng muốn đến</li>
-  </ul>
-  <p>Chúng tôi không yêu cầu khách hàng cung cấp thông tin nhạy cảm không cần thiết qua tin nhắn.</p>
-
-  <h2>2. Mục đích sử dụng thông tin</h2>
-  <p>Thông tin khách hàng được sử dụng để:</p>
-  <ul>
-    <li>Tư vấn tình trạng ban đầu</li>
-    <li>Hỗ trợ đặt lịch khám</li>
-    <li>Chăm sóc khách hàng</li>
-    <li>Xác nhận lịch hẹn</li>
-    <li>Cải thiện chất lượng tư vấn và dịch vụ</li>
-  </ul>
-
-  <h2>3. Chia sẻ dữ liệu</h2>
-  <p>IVA không bán, trao đổi hoặc chia sẻ thông tin cá nhân của khách hàng cho bên thứ ba vì mục đích thương mại.</p>
-  <p>Thông tin chỉ được sử dụng nội bộ trong phạm vi phòng khám hoặc các hệ thống hỗ trợ vận hành tư vấn, đặt lịch và chăm sóc khách hàng.</p>
-
-  <h2>4. Lưu trữ và bảo mật</h2>
-  <p>Chúng tôi áp dụng các biện pháp phù hợp để bảo vệ thông tin khách hàng khỏi truy cập trái phép, mất mát hoặc sử dụng sai mục đích.</p>
-
-  <h2>5. Yêu cầu xóa dữ liệu người dùng</h2>
-  <p>Khách hàng có thể yêu cầu xóa dữ liệu đã cung cấp bằng một trong các cách sau:</p>
-  <ul>
-    <li>Nhắn tin trực tiếp vào Fanpage Phòng khám Phục hồi chức năng IVA với nội dung: “Yêu cầu xóa dữ liệu”</li>
-    <li>Gọi hoặc nhắn tin cho phòng khám để yêu cầu hỗ trợ</li>
-  </ul>
-  <p>Sau khi tiếp nhận yêu cầu, IVA sẽ kiểm tra và thực hiện xóa hoặc ẩn thông tin liên quan trong phạm vi hệ thống quản lý của phòng khám.</p>
-
-  <h2>6. Thông tin liên hệ</h2>
-  <p><strong>Phòng khám Phục hồi chức năng IVA</strong></p>
-  <ul>
-    <li>CN1: 33N Hoàng Quốc Việt, Tân Mỹ, TP.HCM</li>
-    <li>CN2: 94 Đường 56, Bình Trưng, TP.HCM</li>
-  </ul>
-  <p>Nếu cần hỗ trợ về quyền riêng tư hoặc xóa dữ liệu, khách hàng vui lòng liên hệ Fanpage chính thức của phòng khám.</p>
+  <p>IVA sử dụng thông tin khách hàng nhắn qua Fanpage để tư vấn ban đầu, hỗ trợ đặt lịch, xác nhận lịch hẹn và chăm sóc khách hàng.</p>
+  <h2>Thông tin có thể tiếp nhận</h2>
+  <p>Họ tên, số điện thoại, nội dung tư vấn, tình trạng cơ xương khớp khách chủ động chia sẻ, thời gian/cơ sở muốn đặt lịch.</p>
+  <h2>Chia sẻ dữ liệu</h2>
+  <p>IVA không bán hoặc chia sẻ thông tin cá nhân của khách hàng cho bên thứ ba vì mục đích thương mại.</p>
+  <h2>Xóa dữ liệu</h2>
+  <p>Khách hàng có thể nhắn Fanpage với nội dung “Yêu cầu xóa dữ liệu”. IVA sẽ kiểm tra và xóa/ẩn thông tin liên quan trong phạm vi hệ thống quản lý của phòng khám.</p>
+  <h2>Liên hệ</h2>
+  <p>CN1: 33N Hoàng Quốc Việt, Tân Mỹ, TP.HCM</p>
+  <p>CN2: 94 Đường 56, Bình Trưng, TP.HCM</p>
 </body>
 </html>`;
 
@@ -128,15 +90,38 @@ function delay(ms) {
 }
 
 function naturalDelay(message = "") {
-  const base = MIN_REPLY_DELAY_MS + Math.min(message.length * 35, 1600);
+  const base = MIN_REPLY_DELAY_MS + Math.min(message.length * 28, 1400);
   const jitter = Math.floor(Math.random() * Math.max(500, MAX_REPLY_DELAY_MS - MIN_REPLY_DELAY_MS));
   return Math.min(MAX_REPLY_DELAY_MS, base + jitter);
 }
 
+function normalizeText(text = "") {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function chatText(rawText = "") {
+  return ` ${normalizeText(rawText)} `
+    .replace(/\bbn\b/g, " bao nhieu ")
+    .replace(/\bbnhieu\b/g, " bao nhieu ")
+    .replace(/\bdc\b/g, " duoc ")
+    .replace(/\bdc k\b/g, " duoc khong ")
+    .replace(/\bdc ko\b/g, " duoc khong ")
+    .replace(/\bk\b/g, " khong ")
+    .replace(/\bko\b/g, " khong ")
+    .replace(/\bkh\b/g, " khong ")
+    .replace(/\bc\b/g, " co ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function getHistory(senderId) {
-  if (!conversations.has(senderId)) {
-    conversations.set(senderId, [...DEFAULT_HISTORY]);
-  }
+  if (!conversations.has(senderId)) conversations.set(senderId, [...DEFAULT_HISTORY]);
   return conversations.get(senderId);
 }
 
@@ -155,68 +140,58 @@ function getCustomerState(senderId) {
       wantsBooking: false,
       hasPhone: false,
       objection: "",
+      stage: "new",
       leadGroup: "unknown",
       temperature: "cold",
-      stage: "new",
       lastQuestion: "",
       askedFields: new Set(),
-      assessed: false,
+      assessmentSent: false,
+      priceSent: false,
+      addressSent: false,
+      bookingAsked: false,
+      specificDiseaseAnswered: false,
+      lastBotMessage: "",
+      sentQuestionKeys: new Set(),
+      messageCount: 0,
     });
   }
   return customerStates.get(senderId);
-}
-
-function normalizeText(text) {
-  return text
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function expandChatShortcuts(text) {
-  return ` ${text} `
-    .replace(/\bbn\b/g, " bao nhieu ")
-    .replace(/\bbnhieu\b/g, " bao nhieu ")
-    .replace(/\bdc\b/g, " duoc ")
-    .replace(/\bdc k\b/g, " duoc khong ")
-    .replace(/\bdc ko\b/g, " duoc khong ")
-    .replace(/\bđc\b/g, " duoc ")
-    .replace(/\bk\b/g, " khong ")
-    .replace(/\bko\b/g, " khong ")
-    .replace(/\bkh\b/g, " khong ")
-    .replace(/\bc\b/g, " co ")
-    .replace(/\bđc ko\b/g, " duoc khong ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function chatText(rawText) {
-  return expandChatShortcuts(normalizeText(rawText));
-}
-
-function detectPersona(rawText, state) {
-  const text = chatText(rawText);
-  if (/\banh\b/.test(text)) state.persona = "anh";
-  if (/\bchi\b/.test(text)) state.persona = "chị";
-  if (/\bco\b/.test(text)) state.persona = "cô";
-  if (/\bchu\b/.test(text)) state.persona = "chú";
 }
 
 function subject(state) {
   return state.persona || "mình";
 }
 
+function capitalizeFirst(textValue) {
+  return textValue ? textValue.charAt(0).toUpperCase() + textValue.slice(1) : textValue;
+}
+
+function alignPronouns(state, message) {
+  const persona = subject(state);
+  if (persona === "mình") return message;
+
+  return message
+    .replace(/\bMình\b/g, capitalizeFirst(persona))
+    .replace(/\bmình\b/g, persona);
+}
+
+function detectPersona(rawText, state) {
+  const raw = rawText.toLowerCase();
+  const text = chatText(rawText);
+  if (/(^|\s)anh(\s|$)/.test(text)) state.persona = "anh";
+  if (/(^|\s)(chị|chi)(\s|$)/.test(raw) || /(^|\s)chi(\s|$)/.test(text)) state.persona = "chị";
+  if (/(^|\s)cô(\s|$)/.test(raw)) state.persona = "cô";
+  if (/(^|\s)(chú|chu)(\s|$)/.test(raw) || /(^|\s)chu(\s|$)/.test(text)) state.persona = "chú";
+}
+
 function detectPain(rawText) {
   const text = chatText(rawText);
-  if (/(co vai gay|vai gay|dau vai gay|te tay)/.test(text)) return "vai gáy";
+  if (/(co vai gay|vai gay|dau vai gay|co gay|te tay)/.test(text)) return "vai gáy";
   if (/(dau vai|vai\b)/.test(text)) return "vai";
-  if (/(dau lung|lung|that lung|te chan|than kinh toa)/.test(text)) return "lưng";
+  if (/(that lung|dau lung|song lung|lung|te chan|than kinh toa)/.test(text)) return "lưng";
   if (/(dau goi|goi\b)/.test(text)) return "gối";
   if (/(hang|khop hang)/.test(text)) return "háng";
-  if (/(tay|khuyu tay|elbow|tennis elbow)/.test(text)) return "tay";
+  if (/(khuyu tay|elbow|tennis elbow|dau tay|\btay\b)/.test(text)) return "tay";
   return "";
 }
 
@@ -233,16 +208,16 @@ function detectDisease(rawText) {
 
 function detectDuration(rawText) {
   const text = chatText(rawText);
-  if (/(hom qua|moi|gan day|vua bi|2 tuan|tuan|thang|nam|ngay)/.test(text)) return rawText.trim();
   if (/^\d+\s*(ngay|tuan|thang|nam)/.test(text)) return rawText.trim();
+  if (/(hom qua|moi day|gan day|vua bi|moi|tuan|thang|nam|ngay)/.test(text)) return rawText.trim();
   return "";
 }
 
 function detectTrigger(rawText) {
   const text = chatText(rawText);
   if (/(di moi dau|di lai|di dung|di la dau|di thay dau|di lai thay dau|di lai.*dau)/.test(text)) return "đi lại đau";
-  if (/(ngoi lau|ngoi)/.test(text)) return "ngồi lâu đau";
-  if (/(van dong|choi the thao|be nang|tap|the thao)/.test(text)) return "vận động";
+  if (/(ngoi lau|ngoi lam viec|ngoi)/.test(text)) return "ngồi lâu đau";
+  if (/(van dong|choi the thao|be nang|tap gym|tap|the thao)/.test(text)) return "vận động";
   if (/(tu nhien|tu dung)/.test(text)) return "tự nhiên";
   return "";
 }
@@ -250,39 +225,53 @@ function detectTrigger(rawText) {
 function detectRadiation(rawText) {
   const text = chatText(rawText);
   if (/(te tay|lan xuong tay|moi tay|dau dau)/.test(text)) return "tay";
-  if (/(te chan|lan xuong chan|lan xuong mong|moi chan)/.test(text)) return "chân";
-  if (/^(co|uh|u|vang|da co|co em|vang em|da)$/i.test(text)) return "có";
-  if (/^(khong|k|ko|khong em|k em|ko em|khong a|k a|ko a|khong dau|khong co)$/i.test(text)) return "không";
+  if (/(te chan|lan xuong chan|lan xuong mong|xuong mong|moi chan|dau xuong mong)/.test(text)) return "chân";
+  if (/^(co|uh|u|vang|da co|co em|vang em|da|co a|co chi)$/.test(text)) return "có";
+  if (/^(khong|khong em|khong a|khong chi|khong dau|khong co|chua|chua em)$/.test(text)) return "không";
   return "";
 }
 
 function detectTreatment(rawText) {
   const text = chatText(rawText);
-  if (/(chua|chưa)/.test(rawText) || /\bchua\b/.test(text)) return "chưa";
-  if (/(co cham cuu|cham cuu|vat ly tri lieu|vltl|uong thuoc|da dieu tri|co di)/.test(text)) return rawText.trim();
+  if (/^(chua|chua em|chua a|chua chi)$/.test(text)) return "chưa";
+  if (/(cham cuu|vat ly tri lieu|vltl|uong thuoc|da dieu tri|co di|da chua|phau thuat|tap)/.test(text)) return rawText.trim();
   return "";
 }
 
 function detectYesNo(rawText) {
   const text = chatText(rawText);
-  if (/^(co|uh|u|vang|da|co em|vang em|da co|co a|co anh|co chi)$/i.test(text)) return "có";
-  if (/^(khong|khong em|khong a|khong anh|khong chi|khong dau|khong co|chua|chua em)$/i.test(text)) return "không";
+  if (/^(co|uh|u|vang|da|co em|vang em|da co|co a|co anh|co chi)$/.test(text)) return "có";
+  if (/^(khong|khong em|khong a|khong anh|khong chi|khong dau|khong co|chua|chua em)$/.test(text)) return "không";
   return "";
+}
+
+function hasPhoneNumber(rawText) {
+  return /(?:\+?84|0)(?:\d[\s.-]?){8,10}\d/.test(rawText);
 }
 
 function isPriceQuestion(rawText) {
   const text = chatText(rawText);
-  return /(gia|phi|chi phi|bao nhieu|bn|bao tien|mac|dat)/.test(text);
-}
-
-function isTreatmentAbilityQuestion(rawText) {
-  const text = chatText(rawText);
-  return /(co dieu tri|dieu tri duoc|tri duoc|ho tro dieu tri|co chua duoc)/.test(text);
+  return /(gia|phi|chi phi|bao nhieu|bao tien|mac|dat|ton kem|bang gia|buoi le|phat sinh|ep mua)/.test(text);
 }
 
 function isAddressQuestion(rawText) {
   const text = chatText(rawText);
-  return /^(dia chi|dc|duoc chi|o dau|ben minh o dau|phong kham o dau)$/.test(text) || /(dia chi|o dau)/.test(text);
+  return /(dia chi|o dau|cho xin dia chi|xin dia chi|kiem tra o dau|ben minh co kiem tra khong|co kiem tra khong)/.test(text);
+}
+
+function isBookingIntent(rawText) {
+  const text = chatText(rawText);
+  return /(hom nay|ngay mai|may gio|co lich khong|dat lich|giu lich|lich nhu the nao|qua duoc|qua kham|binh trung|hoang quoc viet)/.test(text);
+}
+
+function isSpecificDiseaseQuestion(rawText) {
+  const text = chatText(rawText);
+  return /(cu the la benh gi|benh gi|bi gi|la gi|co phai benh)/.test(text);
+}
+
+function isMethodQuestion(rawText) {
+  const text = chatText(rawText);
+  return /(phuong phap|pp nao|dieu tri the nao|tri lieu the nao|co nhung pp|co may gi|vat ly tri lieu)/.test(text);
 }
 
 function isPing(rawText) {
@@ -290,37 +279,43 @@ function isPing(rawText) {
   return /^(alo|hello|helo|em oi|e oi|co ai khong)$/.test(text);
 }
 
-function hasPhoneNumber(rawText) {
-  return /(?:\+?84|0)(?:\d[\s.-]?){8,10}\d/.test(rawText);
-}
-
-function isBookingIntent(rawText) {
-  const text = chatText(rawText);
-  return /(hom nay|ngay mai|qua duoc|qua kham|dat lich|giu lich|may gio|dia chi dau|o dau)/.test(text);
-}
-
 function detectObjection(rawText) {
   const text = chatText(rawText);
-  if (/(so dat|mac|dat qua|bao tien|so phat sinh|ep mua|co ep)/.test(text)) return "cost_concern";
-  if (/(ban|chua sap xep|de suy nghi|chua co thoi gian)/.test(text)) return "busy";
+  if (/(so dat|dat qua|so phat sinh|ep mua|co ep|phat sinh gi)/.test(text)) return "cost_concern";
+  if (/(dang ban|anh dang ban|chi dang ban|chua sap xep|de suy nghi|chua co thoi gian)/.test(text)) return "busy";
   return "";
 }
 
-function classifyLead(state) {
-  const hasClinicalSignal = Boolean(state.pain || state.disease || state.duration || state.trigger || state.radiation);
-  const pathologySignal =
-    Boolean(state.disease) ||
-    (state.duration && /(thang|nam)/i.test(normalizeText(state.duration))) ||
-    (state.radiation && state.radiation !== "không") ||
-    Boolean(state.treated && state.treated !== "chưa");
+function resetClinicalIfNewTopic(state, pain, disease) {
+  const changedPain = pain && state.pain && pain !== state.pain;
+  const changedDisease = disease && state.disease && disease !== state.disease;
+  if (!changedPain && !changedDisease) return;
 
-  if (state.hasPhone || state.wantsBooking) {
-    state.temperature = "hot";
-  } else if (state.askedPrice || state.askedAddress || pathologySignal) {
-    state.temperature = "warm";
-  } else {
-    state.temperature = hasClinicalSignal ? "warm" : "cold";
-  }
+  state.pain = "";
+  state.disease = "";
+  state.duration = "";
+  state.trigger = "";
+  state.radiation = "";
+  state.treated = "";
+  state.lastQuestion = "";
+  state.askedFields = new Set();
+  state.assessmentSent = false;
+  state.priceSent = false;
+  state.bookingAsked = false;
+  state.specificDiseaseAnswered = false;
+}
+
+function classifyLead(state) {
+  const hasSignal = Boolean(state.pain || state.disease || state.duration || state.trigger || state.radiation);
+  const strongerSignal =
+    Boolean(state.disease) ||
+    Boolean(state.radiation && state.radiation !== "không") ||
+    Boolean(state.treated && state.treated !== "chưa") ||
+    /(thang|nam)/.test(normalizeText(state.duration));
+
+  if (state.hasPhone || state.wantsBooking) state.temperature = "hot";
+  else if (state.askedPrice || state.askedAddress || strongerSignal) state.temperature = "warm";
+  else state.temperature = hasSignal ? "warm" : "cold";
 
   if (state.hasPhone) state.leadGroup = "left_phone";
   else if (state.wantsBooking) state.leadGroup = "booking_intent";
@@ -328,49 +323,22 @@ function classifyLead(state) {
   else if (state.askedPrice) state.leadGroup = "price_question";
   else if (state.askedAddress) state.leadGroup = "address_question";
   else if (state.disease) state.leadGroup = "known_disease";
-  else if (state.pain) state.leadGroup = pathologySignal ? "likely_pathology" : "symptom_unknown";
+  else if (state.pain) state.leadGroup = strongerSignal ? "likely_pathology" : "symptom_unknown";
   else state.leadGroup = "unknown";
-
-  return state;
 }
 
 function updateStateFromText(state, rawText) {
   detectPersona(rawText, state);
-  const yesNo = detectYesNo(rawText);
+
   const pain = detectPain(rawText);
   const disease = detectDisease(rawText);
+  resetClinicalIfNewTopic(state, pain, disease);
+
+  const yesNo = detectYesNo(rawText);
   const duration = detectDuration(rawText);
   const trigger = detectTrigger(rawText);
   const radiation = detectRadiation(rawText);
   const treated = detectTreatment(rawText);
-
-  if (yesNo && state.lastQuestion === "radiation") state.radiation = yesNo;
-  if (yesNo && state.lastQuestion === "treated") state.treated = yesNo === "không" ? "chưa" : "có";
-  if (!trigger && state.lastQuestion === "trigger" && /dau/.test(chatText(rawText))) {
-    if (/di/.test(chatText(rawText))) state.trigger = "đi lại đau";
-    if (/ngoi/.test(chatText(rawText))) state.trigger = "ngồi lâu đau";
-    if (/tu nhien/.test(chatText(rawText))) state.trigger = "tự nhiên";
-  }
-
-  if (pain && state.pain && pain !== state.pain) {
-    state.duration = "";
-    state.trigger = "";
-    state.radiation = "";
-    state.treated = "";
-    state.askedPrice = false;
-    state.lastQuestion = "";
-    state.assessed = false;
-  }
-
-  if (disease && state.disease && disease !== state.disease) {
-    state.duration = "";
-    state.trigger = "";
-    state.radiation = "";
-    state.treated = "";
-    state.askedPrice = false;
-    state.lastQuestion = "";
-    state.assessed = false;
-  }
 
   if (pain) state.pain = pain;
   if (disease) state.disease = disease;
@@ -378,160 +346,243 @@ function updateStateFromText(state, rawText) {
   if (trigger) state.trigger = trigger;
   if (radiation) state.radiation = radiation;
   if (treated) state.treated = treated;
+
+  if (yesNo && state.lastQuestion === "radiation") state.radiation = yesNo;
+  if (yesNo && state.lastQuestion === "treated") state.treated = yesNo === "không" ? "chưa" : "có";
+
+  if (!trigger && state.lastQuestion === "trigger") {
+    const text = chatText(rawText);
+    if (/di/.test(text)) state.trigger = "đi lại đau";
+    if (/ngoi/.test(text)) state.trigger = "ngồi lâu đau";
+    if (/tu nhien/.test(text)) state.trigger = "tự nhiên";
+    if (/tap|gym|the thao/.test(text)) state.trigger = "vận động";
+  }
+
   if (isPriceQuestion(rawText)) state.askedPrice = true;
   if (isAddressQuestion(rawText)) state.askedAddress = true;
   if (isBookingIntent(rawText)) state.wantsBooking = true;
   if (hasPhoneNumber(rawText)) state.hasPhone = true;
+
   const objection = detectObjection(rawText);
   if (objection) state.objection = objection;
-
-  if (!state.duration && state.lastQuestion === "duration" && duration) state.duration = duration;
-  if (!state.trigger && state.lastQuestion === "trigger" && trigger) state.trigger = trigger;
-  if (!state.radiation && state.lastQuestion === "radiation" && radiation) state.radiation = radiation;
-  if (!state.treated && state.lastQuestion === "treated" && treated) state.treated = treated;
 
   classifyLead(state);
 }
 
-function reply(state, message, lastQuestion = "") {
+function result(state, message, lastQuestion = "") {
+  const clean = alignPronouns(state, message).trim();
   state.lastQuestion = lastQuestion;
   if (lastQuestion) state.askedFields.add(lastQuestion);
-  return { action: "REPLY", message };
+  return { action: "REPLY", message: clean };
 }
 
-function priceReply(state) {
-  state.assessed = true;
-  state.stage = "price_presented";
-  return reply(
-    state,
-    approvedTemplates.price,
-  );
+function handoff(reason = "") {
+  if (reason) console.log("Silent handoff reason:", reason);
+  return { action: "HANDOFF", message: "" };
+}
+
+function askProblem(state) {
+  state.stage = "asking_problem";
+  return result(state, "Dạ mình đang đau phần nào ạ?", "problem");
 }
 
 function askDuration(state) {
-  if (state.lastQuestion === "duration") return { action: "HANDOFF", message: "" };
-  if (state.askedFields.has("duration")) return askTrigger(state);
+  if (state.duration || state.askedFields.has("duration")) return askTrigger(state);
   state.stage = "asking_duration";
   const s = subject(state);
-  if (state.disease) return reply(state, `Dạ ${s} bị tình trạng này bao lâu rồi ạ?`, "duration");
-  return reply(state, `Dạ tình trạng đau ${state.pain || "này"} của ${s} kéo dài bao lâu rồi ạ?`, "duration");
+  if (state.disease) return result(state, `Dạ ${s} bị lâu chưa ạ?`, "duration");
+  return result(state, `Dạ ${s} đau ${state.pain || "phần này"} lâu chưa ạ?`, "duration");
 }
 
 function askTrigger(state) {
-  if (state.lastQuestion === "trigger") return askRadiation(state);
-  if (state.askedFields.has("trigger")) return askRadiation(state);
+  if (state.trigger || state.askedFields.has("trigger")) return askRadiation(state);
   state.stage = "asking_trigger";
   const s = subject(state);
-  if (state.pain === "lưng") return reply(state, `Dạ ${s} đau tăng khi đi lại, ngồi lâu hay tự nhiên đau ạ?`, "trigger");
-  if (state.pain === "vai" || state.pain === "vai gáy") {
-    return reply(state, `Dạ ${s} đau sau vận động hay tự nhiên đau ạ?`, "trigger");
-  }
-  if (state.pain === "gối") return reply(state, `Dạ ${s} đi lại đau nhiều hay nghỉ cũng đau ạ?`, "trigger");
-  return reply(state, `Dạ ${s} đau sau vận động hay tự nhiên đau ạ?`, "trigger");
+  if (state.pain === "lưng") return result(state, `Dạ ${s} đi lại hoặc ngồi lâu có đau hơn không ạ?`, "trigger");
+  if (state.pain === "gối") return result(state, `Dạ ${s} đi lại có đau nhiều hơn không ạ?`, "trigger");
+  if (state.pain === "háng") return result(state, `Dạ ${s} đau khi đi lại hay lúc đứng lên ngồi xuống ạ?`, "trigger");
+  if (state.pain === "vai" || state.pain === "vai gáy") return result(state, `Dạ ${s} đau sau vận động hay ngồi làm việc lâu ạ?`, "trigger");
+  return result(state, `Dạ ${s} đau sau vận động hay tự nhiên đau ạ?`, "trigger");
 }
 
 function askRadiation(state) {
-  if (state.lastQuestion === "radiation") return assessmentReply(state);
-  if (state.askedFields.has("radiation")) return assessmentReply(state);
+  if (state.radiation || state.askedFields.has("radiation")) return assessmentReply(state);
   state.stage = "asking_radiation";
   const s = subject(state);
-  if (state.pain === "lưng" || /thắt lưng|tọa|thoát vị đĩa đệm/.test(state.disease)) {
-    return reply(state, `Dạ ${s} có đau lan xuống mông, chân hoặc tê chân không ạ?`, "radiation");
+  if (state.pain === "lưng" || /(tọa|thoát vị)/.test(state.disease)) {
+    return result(state, `Dạ ${s} có đau lan xuống mông, chân hoặc tê chân không ạ?`, "radiation");
   }
   if (state.pain === "vai" || state.pain === "vai gáy" || /cổ/.test(state.disease)) {
-    return reply(state, `Dạ ${s} có đau lan xuống tay hoặc tê tay không ạ?`, "radiation");
+    return result(state, `Dạ ${s} có đau lan xuống tay hoặc tê tay không ạ?`, "radiation");
   }
-  if (state.pain === "gối") return reply(state, `Dạ ${s} đi lại có bị đau nhói hoặc cứng khớp không ạ?`, "radiation");
-  return reply(state, `Dạ ${s} có bị lan đau hoặc tê không ạ?`, "radiation");
+  if (state.pain === "gối") {
+    return result(state, `Dạ ${s} đi lại có đau nhói hoặc cứng khớp không ạ?`, "radiation");
+  }
+  if (state.pain === "tay") {
+    return result(state, `Dạ ${s} còn đau khi cầm nắm hoặc xoay tay không ạ?`, "radiation");
+  }
+  return assessmentReply(state);
+}
+
+function diseaseLabel(state) {
+  const noRadiation = state.radiation === "không";
+  const hasRadiation = state.radiation && state.radiation !== "không";
+  const longTime = /(thang|nam)/.test(normalizeText(state.duration));
+  const sport = /(tap|gym|the thao|van dong)/.test(normalizeText(state.trigger));
+
+  if (state.disease) return state.disease;
+  if (state.pain === "lưng" && hasRadiation) return "thoát vị đĩa đệm thắt lưng hoặc đau thần kinh tọa";
+  if (state.pain === "lưng" && (noRadiation || sport)) return sport ? "căng cơ vùng thắt lưng hoặc vấn đề cột sống thắt lưng nhẹ" : "vấn đề cột sống thắt lưng";
+  if (state.pain === "lưng") return longTime ? "vấn đề cột sống thắt lưng" : "căng cơ hoặc vấn đề cột sống thắt lưng";
+  if ((state.pain === "vai" || state.pain === "vai gáy") && hasRadiation) return "thoái hóa đốt sống cổ hoặc chèn ép rễ thần kinh";
+  if (state.pain === "vai" || state.pain === "vai gáy") return longTime ? "căng cơ vùng vai gáy hoặc vấn đề đốt sống cổ" : "căng cơ vùng vai gáy";
+  if (state.pain === "gối") return "vấn đề khớp gối";
+  if (state.pain === "háng") return "vấn đề khớp háng";
+  if (state.pain === "tay") return sport ? "căng cơ/gân vùng tay do vận động" : "vấn đề cơ gân vùng tay";
+  return "";
 }
 
 function assessmentReply(state) {
+  if (state.assessmentSent) return handoff("assessment already sent");
+
   const s = subject(state);
-  state.assessed = true;
+  const likely = diseaseLabel(state);
+  state.assessmentSent = true;
   state.stage = "assessed";
 
+  if (!likely) return handoff("no likely label");
+  return result(state, `Dạ dấu hiệu này có thể nghiêng về ${likely}. ${s} nên qua để bác sĩ kiểm tra kỹ hơn ạ.`);
+}
+
+function specificDiseaseReply(state) {
+  if (state.specificDiseaseAnswered) return handoff("specific disease already answered");
+  const s = subject(state);
+  const likely = diseaseLabel(state);
+  state.specificDiseaseAnswered = true;
+  state.assessmentSent = true;
+  state.stage = "specific_disease_answered";
+
+  if (!likely) return handoff("no disease label for specific question");
+  return result(state, `Dạ hiện tại em chỉ nhận định sơ bộ là nghiêng về ${likely}. ${s} qua bác sĩ kiểm tra sẽ rõ mức độ hơn ạ.`);
+}
+
+function priceReply(state) {
+  if (!hasEnoughForPrice(state)) return nextClinicalQuestionBeforePrice(state);
+  if (!state.assessmentSent) {
+    state.assessmentSent = true;
+    const likely = diseaseLabel(state);
+    const prefix = likely ? `Dạ dấu hiệu này có thể nghiêng về ${likely}. ` : "";
+    state.priceSent = true;
+    state.stage = "price_presented";
+    return result(state, `${prefix}${CLINIC.price} ${CLINIC.priceClose}`);
+  }
+  if (state.priceSent) return bookingReply(state);
+  state.priceSent = true;
+  state.stage = "price_presented";
+  return result(state, `${CLINIC.price} ${CLINIC.priceClose}`);
+}
+
+function hasEnoughForPrice(state) {
   if (state.disease) {
-    return reply(
-      state,
-      `Dạ tình trạng này mình nên để bác sĩ kiểm tra kỹ mức độ ảnh hưởng rồi lên hướng trị liệu phù hợp cho ${s} ạ. ${s} tiện qua hôm nay hay ngày mai?`,
-    );
+    return Boolean(state.duration && (state.treated || state.radiation));
   }
 
-  if (state.pain === "lưng") {
-    const likely = state.radiation && state.radiation !== "không"
-      ? "thoát vị đĩa đệm thắt lưng hoặc đau thần kinh tọa"
-      : "vấn đề cột sống thắt lưng";
-    return reply(state, `Dạ dấu hiệu này có thể nghiêng về ${likely}. ${s} nên qua để bác sĩ kiểm tra kỹ hơn ạ.`);
+  if (!state.pain) return false;
+  if (state.pain === "lưng" || state.pain === "vai" || state.pain === "vai gáy") {
+    return Boolean(state.duration && state.trigger && state.radiation);
   }
 
-  if (state.pain === "vai" || state.pain === "vai gáy") {
-    const likely = state.radiation && state.radiation !== "không"
-      ? "thoái hóa đốt sống cổ hoặc chèn ép rễ thần kinh"
-      : "căng cơ vùng vai gáy";
-    return reply(state, `Dạ dấu hiệu này có thể nghiêng về ${likely}. ${s} nên qua để bác sĩ kiểm tra kỹ hơn ạ.`);
+  if (state.pain === "gối" || state.pain === "háng" || state.pain === "tay") {
+    return Boolean(state.duration && state.trigger);
   }
 
-  return reply(state, `Dạ tình trạng này mình nên qua để bác sĩ kiểm tra kỹ hơn ạ.`);
+  return Boolean(state.duration && state.trigger);
+}
+
+function nextClinicalQuestionBeforePrice(state) {
+  if (!state.pain && !state.disease) return askProblem(state);
+  if (state.disease) return knownDiseaseFlow(state, "");
+  return symptomFlow(state);
+}
+
+function addressReply(state) {
+  state.addressSent = true;
+  state.stage = "address_sent";
+  if (state.assessmentSent || state.wantsBooking || state.priceSent) {
+    return result(state, `${CLINIC.address} ${CLINIC.addressAsk}`);
+  }
+  return result(state, `${CLINIC.address} Mình đang đau phần nào ạ?`, "problem");
+}
+
+function bookingReply(state) {
+  if (state.hasPhone) {
+    state.stage = "phone_captured";
+    return result(state, "Dạ em nhận được SĐT rồi ạ. Mình tiện cơ sở Hoàng Quốc Việt hay Bình Trưng để em giữ lịch?");
+  }
+
+  if (!state.bookingAsked) {
+    state.bookingAsked = true;
+    state.stage = "booking_branch";
+    return result(state, "Dạ hôm nay mình qua được ạ. Mình tiện Hoàng Quốc Việt hay Bình Trưng?");
+  }
+
+  state.stage = "booking_phone";
+  return result(state, "Dạ mình cho em xin tên và SĐT để em giữ lịch cho mình ạ?");
+}
+
+function knownDiseaseFlow(state, customerText) {
+  const s = subject(state);
+
+  if (isMethodQuestion(customerText)) {
+    return result(state, `${CLINIC.methods} ${s} đã điều trị phương pháp nào chưa ạ?`, "treated");
+  }
+
+  if (!state.treated && !state.askedFields.has("treated")) {
+    return result(state, `Dạ ${s} đã điều trị phương pháp nào chưa ạ?`, "treated");
+  }
+  if (!state.duration) return askDuration(state);
+  if (!state.radiation) return askRadiation(state);
+  if (state.askedPrice) return priceReply(state);
+  return assessmentReply(state);
+}
+
+function symptomFlow(state) {
+  if (!state.duration) return askDuration(state);
+  if (!state.trigger) return askTrigger(state);
+  if (!state.radiation) return askRadiation(state);
+  if (state.askedPrice) return priceReply(state);
+  return assessmentReply(state);
 }
 
 function handleDeterministicFlow(senderId, customerText) {
   const state = getCustomerState(senderId);
+  state.messageCount += 1;
   updateStateFromText(state, customerText);
-  const s = subject(state);
 
-  if (isAddressQuestion(customerText)) {
-    return reply(
-      state,
-      approvedTemplates.address,
-    );
-  }
+  if (hasPhoneNumber(customerText)) return bookingReply(state);
+  if (isAddressQuestion(customerText)) return addressReply(state);
+  if (isBookingIntent(customerText) && (state.assessmentSent || state.priceSent || state.wantsBooking)) return bookingReply(state);
+  if (isSpecificDiseaseQuestion(customerText)) return specificDiseaseReply(state);
+  if (isMethodQuestion(customerText)) return result(state, CLINIC.methods);
 
-  if (state.hasPhone) {
-    state.stage = "phone_captured";
-    return reply(state, "Dạ em nhận được số của mình rồi ạ. Mình muốn qua cơ sở Hoàng Quốc Việt hay Bình Trưng để em giữ lịch phù hợp?");
+  if (isPriceQuestion(customerText)) {
+    return priceReply(state);
   }
 
   if (state.objection === "busy") {
     state.stage = "soft_close_busy";
-    return reply(state, approvedTemplates.busy);
+    return result(state, "Dạ không sao ạ, khi nào mình sắp xếp được em giữ ưu đãi phù hợp cho mình nhé.");
   }
 
-  if (isPing(customerText) && state.lastQuestion) {
+  if (isPing(customerText)) {
     if (state.lastQuestion === "duration") return askDuration(state);
     if (state.lastQuestion === "trigger") return askTrigger(state);
     if (state.lastQuestion === "radiation") return askRadiation(state);
-    if (state.lastQuestion === "treated") return reply(state, `Dạ em đây ạ, tình trạng này ${s} đã điều trị phương pháp nào chưa?`, "treated");
+    return askProblem(state);
   }
 
-  if (state.disease) {
-    if (isTreatmentAbilityQuestion(customerText)) {
-      if (!state.duration) {
-        return reply(state, `Dạ bên em có hỗ trợ điều trị ${state.disease} bằng vật lý trị liệu ạ. ${s} bị tình trạng này bao lâu rồi?`, "duration");
-      }
-      if (!state.radiation) return askRadiation(state);
-      return assessmentReply(state);
-    }
-
-    if (!state.treated) {
-      return reply(state, `Dạ tình trạng này ${s} đã điều trị phương pháp nào chưa ạ?`, "treated");
-    }
-    if (!state.duration) return askDuration(state);
-    if (!state.radiation) return askRadiation(state);
-    if (state.askedPrice) return priceReply(state);
-    return assessmentReply(state);
-  }
-
-  if (state.pain) {
-    if (!state.duration) return askDuration(state);
-    if (!state.trigger) return askTrigger(state);
-    if (!state.radiation) return askRadiation(state);
-    if (state.askedPrice) return priceReply(state);
-    return assessmentReply(state);
-  }
-
-  if (state.askedPrice) {
-    return reply(state, approvedTemplates.askProblemForPrice);
-  }
+  if (state.disease) return knownDiseaseFlow(state, customerText);
+  if (state.pain) return symptomFlow(state);
 
   return null;
 }
@@ -539,37 +590,70 @@ function handleDeterministicFlow(senderId, customerText) {
 function responseGuard(state, ai) {
   if (!ai || ai.action !== "REPLY" || !ai.message) return ai;
   const message = ai.message.trim();
-  const text = normalizeText(message);
+  const textValue = normalizeText(message);
+  const lastText = normalizeText(state.lastBotMessage || "");
+  const questionKey = messageQuestionKey(message);
 
-  if (/\bban\b|quy khach|tinh trang cu the/.test(text)) {
-    console.log("Guard blocked robotic wording:", { message });
-    return { action: "HANDOFF", message: "" };
+  if (lastText && textValue === lastText) return handoff("blocked exact duplicate");
+  if (questionKey && state.sentQuestionKeys.has(questionKey)) return handoff(`blocked repeated question key: ${questionKey}`);
+  if (hasPronounConflict(state, message)) return handoff("blocked pronoun conflict");
+  if (/\bban\b|quy khach|tinh trang cu the/.test(textValue)) return handoff("blocked robotic wording");
+  if (message.length > 190) return handoff("blocked long message");
+  if (state.pain && /vi tri nao|dau o dau/.test(textValue)) return handoff("blocked repeated pain location");
+  if (state.duration && /bao lau|lau chua|keo dai/.test(textValue) && state.askedFields.has("duration")) return handoff("blocked repeated duration");
+  if (state.trigger && /(van dong hay tu nhien|di lai hay ngoi lau)/.test(textValue) && state.askedFields.has("trigger")) return handoff("blocked repeated trigger");
+  if (state.radiation && /(lan dau|te khong|te tay|te chan)/.test(textValue) && state.askedFields.has("radiation")) return handoff("blocked repeated radiation");
+
+  if (state.pain === "lưng" && /(te tay|xuong tay)/.test(textValue)) {
+    return handoff("blocked wrong region: back asked hand");
   }
 
-  if (state.pain && /vi tri nao|dau o dau/.test(text)) {
-    console.log("Guard blocked repeated pain location:", { pain: state.pain, message });
-    return { action: "HANDOFF", message: "" };
+  if ((state.pain === "vai" || state.pain === "vai gáy") && /(te chan|xuong chan|xuong mong)/.test(textValue)) {
+    return handoff("blocked wrong region: neck asked leg");
   }
 
-  if (state.duration && /bao lau|lau chua|keo dai/.test(text) && state.askedFields.has("duration")) {
-    console.log("Guard blocked repeated duration:", { duration: state.duration, message });
-    return { action: "HANDOFF", message: "" };
+  return { action: "REPLY", message };
+}
+
+function messageQuestionKey(message) {
+  const textValue = normalizeText(message);
+  if (!textValue.includes("khong") && !textValue.includes("chua") && !textValue.includes("bao lau") && !textValue.includes("hay")) {
+    return "";
   }
 
-  if (state.pain === "lưng" && /(te tay|xuong tay)/.test(text)) {
-    return { action: "REPLY", message: `Dạ ${subject(state)} có đau lan xuống mông, chân hoặc tê chân không ạ?` };
+  if (/dau o vung nao|dang dau o vung nao|vi tri nao|dau o dau/.test(textValue)) return "ask_problem_location";
+  if (/dang dau phan nao|dau phan nao/.test(textValue)) return "ask_problem_location";
+  if (/bao lau|lau chua|keo dai/.test(textValue)) return "ask_duration";
+  if (/van dong hay tu nhien|sau van dong hay tu nhien|di lai ngoi lau hay tu nhien|di lai hay ngoi lau/.test(textValue)) return "ask_trigger";
+  if (/lan xuong tay|te tay/.test(textValue)) return "ask_arm_radiation";
+  if (/lan xuong mong|lan xuong chan|te chan/.test(textValue)) return "ask_leg_radiation";
+  if (/dieu tri phuong phap nao|da dieu tri|da di dieu tri/.test(textValue)) return "ask_treatment";
+  if (/co so hoang quoc viet hay binh trung|tien co so nao/.test(textValue)) return "ask_branch";
+  if (/xin ten va sdt|cho em xin ten|so dien thoai/.test(textValue)) return "ask_phone";
+  return "";
+}
+
+function hasPronounConflict(state, message) {
+  const textValue = normalizeText(message);
+  if (/\bban\b|quy khach/.test(textValue)) return true;
+
+  const raw = message.toLowerCase();
+  const pronouns = [];
+  if (/(^|\s)anh(\s|$)/.test(textValue)) pronouns.push("anh");
+  if (/(^|\s)(chị|chi)(\s|$)/.test(raw) || /(^|\s)chi(\s|$)/.test(textValue)) pronouns.push("chị");
+  if (/(^|\s)cô(\s|$)/.test(raw)) pronouns.push("cô");
+  if (/(^|\s)(chú|chu)(\s|$)/.test(raw) || /(^|\s)chu(\s|$)/.test(textValue)) pronouns.push("chú");
+  if (/\bminh\b/.test(textValue)) pronouns.push("mình");
+
+  const uniquePronouns = [...new Set(pronouns)];
+  const persona = state.persona || "mình";
+
+  if (persona === "mình") {
+    return uniquePronouns.some((p) => ["anh", "chị", "cô", "chú"].includes(p));
   }
 
-  if ((state.pain === "vai" || state.pain === "vai gáy") && /(te chan|xuong chan|xuong mong)/.test(text)) {
-    return { action: "REPLY", message: `Dạ ${subject(state)} có đau lan xuống tay hoặc tê tay không ạ?` };
-  }
-
-  if (message.length > 180) {
-    console.log("Guard blocked long message:", { length: message.length, message });
-    return { action: "HANDOFF", message: "" };
-  }
-
-  return ai;
+  if (uniquePronouns.includes("mình")) return true;
+  return uniquePronouns.some((p) => ["anh", "chị", "cô", "chú"].includes(p) && p !== persona);
 }
 
 function logLeadSignal(senderId, state, customerText, botMessage = "") {
@@ -588,19 +672,18 @@ function logLeadSignal(senderId, state, customerText, botMessage = "") {
     askedPrice: state.askedPrice,
     askedAddress: state.askedAddress,
     hasPhone: state.hasPhone,
-    objection: state.objection,
+    priceSent: state.priceSent,
+    addressSent: state.addressSent,
+    bookingAsked: state.bookingAsked,
+    assessmentSent: state.assessmentSent,
   });
 }
 
 async function openaiReply(senderId, customerText) {
-  if (!OPENAI_API_KEY) {
-    console.error("Missing OPENAI_API_KEY");
-    return { action: "HANDOFF", message: "" };
-  }
+  if (!OPENAI_API_KEY) return handoff("missing OPENAI_API_KEY");
 
   const history = getHistory(senderId);
   history.push({ role: "user", content: customerText });
-  console.log("Incoming message:", { senderId, customerText });
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -612,21 +695,20 @@ async function openaiReply(senderId, customerText) {
       model: OPENAI_MODEL,
       instructions: IVA_SYSTEM_PROMPT,
       input: history.slice(-16),
-      temperature: 0.35,
-      max_output_tokens: 220,
+      temperature: 0.15,
+      max_output_tokens: 180,
     }),
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
-    console.error("OpenAI error", response.status, errorText);
-    return { action: "HANDOFF", message: "" };
+    console.error("OpenAI error", response.status, await response.text());
+    return handoff("openai error");
   }
 
   const data = await response.json();
   const outputText =
     data.output_text ||
-    data.output?.flatMap((item) => item.content || [])?.map((c) => c.text || "")?.join("") ||
+    data.output?.flatMap((item) => item.content || [])?.map((c) => c.text || "").join("") ||
     "";
 
   let parsed;
@@ -639,10 +721,8 @@ async function openaiReply(senderId, customerText) {
 
   if (parsed.action === "REPLY" && parsed.message) {
     history.push({ role: "assistant", content: parsed.message });
-    console.log("AI reply:", { senderId, message: parsed.message });
   } else {
     history.push({ role: "assistant", content: "[HANDOFF_SILENT]" });
-    console.log("AI silent handoff:", { senderId, customerText, parsed });
   }
 
   if (history.length > 24) history.splice(0, history.length - 24);
@@ -655,19 +735,14 @@ async function graphApi(path, body) {
     return;
   }
 
-  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${path}?access_token=${encodeURIComponent(
-    PAGE_ACCESS_TOKEN,
-  )}`;
-
+  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${path}?access_token=${encodeURIComponent(PAGE_ACCESS_TOKEN)}`;
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 
-  if (!response.ok) {
-    console.error("Graph API error", response.status, await response.text());
-  }
+  if (!response.ok) console.error("Graph API error", response.status, await response.text());
 }
 
 async function senderAction(recipientId, action) {
@@ -705,30 +780,27 @@ async function handleMessagingEvent(event) {
   if (isDuplicate(message.mid)) return;
 
   const customerText = message.text?.trim();
-  if (!customerText) {
-    console.log("Non-text message, silent handoff:", senderId);
-    return;
-  }
-
-  console.log("Webhook received text:", { senderId, customerText });
+  if (!customerText) return;
 
   try {
     await senderAction(senderId, "typing_on");
     const deterministic = handleDeterministicFlow(senderId, customerText);
-    const rawAi = deterministic || (await openaiReply(senderId, customerText));
     const state = getCustomerState(senderId);
-    const ai = responseGuard(state, rawAi);
+    const rawReply = deterministic || (await openaiReply(senderId, customerText));
+    const guarded = responseGuard(state, rawReply);
 
-    if (ai.action !== "REPLY" || !ai.message) {
-      console.log("Silent handoff:", { senderId, customerText });
+    if (guarded.action !== "REPLY" || !guarded.message) {
       logLeadSignal(senderId, state, customerText, "");
       await senderAction(senderId, "typing_off");
       return;
     }
 
-    await delay(naturalDelay(ai.message));
-    await sendMessage(senderId, ai.message);
-    logLeadSignal(senderId, state, customerText, ai.message);
+    await delay(naturalDelay(guarded.message));
+    await sendMessage(senderId, guarded.message);
+    state.lastBotMessage = guarded.message;
+    const sentQuestionKey = messageQuestionKey(guarded.message);
+    if (sentQuestionKey) state.sentQuestionKeys.add(sentQuestionKey);
+    logLeadSignal(senderId, state, customerText, guarded.message);
   } catch (error) {
     console.error("Message handling error:", error);
   } finally {
@@ -738,9 +810,7 @@ async function handleMessagingEvent(event) {
 
 async function handleWebhookPost(req, res) {
   const body = await readJson(req);
-  if (body.object !== "page") {
-    return json(res, 404, { error: "Unsupported object" });
-  }
+  if (body.object !== "page") return json(res, 404, { error: "Unsupported object" });
 
   for (const entry of body.entry || []) {
     for (const event of entry.messaging || []) {
@@ -756,10 +826,7 @@ function handleWebhookVerify(req, res, url) {
   const token = url.searchParams.get("hub.verify_token");
   const challenge = url.searchParams.get("hub.challenge");
 
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return text(res, 200, challenge || "");
-  }
-
+  if (mode === "subscribe" && token === VERIFY_TOKEN) return text(res, 200, challenge || "");
   return text(res, 403, "Forbidden");
 }
 
@@ -768,8 +835,7 @@ function verifyMetaSignature(req, rawBody) {
   const signature = req.headers["x-hub-signature-256"];
   if (!appSecret || !signature) return true;
 
-  const expected =
-    "sha256=" + crypto.createHmac("sha256", appSecret).update(rawBody).digest("hex");
+  const expected = "sha256=" + crypto.createHmac("sha256", appSecret).update(rawBody).digest("hex");
   return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
 }
 
@@ -791,13 +857,8 @@ const server = http.createServer(async (req, res) => {
       return html(res, 200, privacyPolicyHtml);
     }
 
-    if (req.method === "GET" && url.pathname === "/webhook") {
-      return handleWebhookVerify(req, res, url);
-    }
-
-    if (req.method === "POST" && url.pathname === "/webhook") {
-      return handleWebhookPost(req, res);
-    }
+    if (req.method === "GET" && url.pathname === "/webhook") return handleWebhookVerify(req, res, url);
+    if (req.method === "POST" && url.pathname === "/webhook") return handleWebhookPost(req, res);
 
     return json(res, 404, { error: "Not found" });
   } catch (error) {
@@ -808,5 +869,5 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`IVA Chatpage Bot running on port ${PORT}`);
-  console.log(`Webhook path: /webhook`);
+  console.log("Webhook path: /webhook");
 });
