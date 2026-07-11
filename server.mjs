@@ -1238,7 +1238,45 @@ async function openaiReply(senderId, customerText) {
   if (!OPENAI_API_KEY) return handoff("missing OPENAI_API_KEY");
 
   const history = getHistory(senderId);
-  history.push({ role: "user", content: customerText });
+  const state = getCustomerState(senderId);
+  const brainContext = {
+    customerText,
+    intent: state.customerIntent,
+    stage: state.stage,
+    knownInfo: {
+      pain: state.pain,
+      disease: state.disease,
+      duration: state.duration,
+      trigger: state.trigger,
+      radiation: state.radiation,
+      treated: state.treated,
+      askedPrice: state.askedPrice,
+      askedAddress: state.askedAddress,
+      assessmentSent: state.assessmentSent,
+      priceSent: state.priceSent,
+      addressSent: state.addressSent,
+      bookingAsked: state.bookingAsked,
+      preferredBranch: state.preferredBranch,
+      customerName: state.customerName,
+      phoneNumber: state.phoneNumber,
+      appointmentTime: state.appointmentTime,
+    },
+    nextGoal: state.nextGoal,
+    nextBestAction: state.nextBestAction,
+    hardRules: [
+      "Trả lời đúng ý khách vừa hỏi trước, không quay lại sườn cũ.",
+      "Nếu hỏi địa chỉ/số mấy thì gửi địa chỉ.",
+      "Nếu đủ tên/SĐT/giờ/cơ sở thì xác nhận lịch.",
+      "Nếu khách hỏi giá sau khi đủ dấu hiệu thì báo ưu đãi 499k/5 buổi.",
+      "Không hỏi lặp lại.",
+      "Không sai vùng: lưng hỏi chân, cổ/vai gáy hỏi tay, gối hỏi gối.",
+      "Nếu không chắc thì HANDOFF.",
+    ],
+  };
+  history.push({
+    role: "user",
+    content: `KHACH_NHAN: ${customerText}\nBO_NHO_VA_Y_DINH_NOI_BO: ${JSON.stringify(brainContext)}`,
+  });
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -1282,6 +1320,18 @@ async function openaiReply(senderId, customerText) {
 
   if (history.length > 24) history.splice(0, history.length - 24);
   return parsed;
+}
+
+async function smartReply(chatKey, customerText, deterministicReply = null) {
+  const state = getCustomerState(chatKey);
+  if (deterministicReply) {
+    const guarded = responseGuard(state, deterministicReply);
+    if (guarded.action === "REPLY" && guarded.message) return guarded;
+    console.log("Deterministic reply blocked, trying AI brain", { chatKey, reason: guarded.message || "guarded" });
+  }
+
+  const aiReply = await openaiReply(chatKey, customerText);
+  return responseGuard(state, aiReply);
 }
 
 async function graphApi(path, body, pageId = "") {
@@ -1366,8 +1416,7 @@ async function handleMessagingEvent(event) {
     await senderAction(senderId, "typing_on", pageId);
     const deterministic = handleDeterministicFlow(chatKey, customerText);
     const state = getCustomerState(chatKey);
-    const rawReply = deterministic || handoff("no controlled rule matched");
-    const guarded = responseGuard(state, rawReply);
+    const guarded = await smartReply(chatKey, customerText, deterministic);
 
     if (guarded.action !== "REPLY" || !guarded.message) {
       logLeadSignal(chatKey, state, customerText, "");
