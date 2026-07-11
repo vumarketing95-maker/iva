@@ -199,6 +199,9 @@ function getCustomerState(senderId) {
       nextBestAction: "ask_problem",
       areaHint: "",
       preferredBranch: "",
+      customerName: "",
+      phoneNumber: "",
+      appointmentTime: "",
       lastQuestion: "",
       askedFields: new Set(),
       assessmentSent: false,
@@ -347,6 +350,41 @@ function hasPhoneNumber(rawText) {
   return /(?:\+?84|0)(?:\d[\s.-]?){8,10}\d/.test(rawText);
 }
 
+function extractPhoneNumber(rawText = "") {
+  const match = rawText.match(/(?:\+?84|0)(?:\d[\s.-]?){8,10}\d/);
+  return match ? match[0].replace(/[^\d+]/g, "") : "";
+}
+
+function detectCustomerName(rawText = "") {
+  const noPhone = rawText.replace(/(?:\+?84|0)(?:\d[\s.-]?){8,10}\d/g, " ");
+  const cleaned = noPhone.replace(/[()\-–—:;,.]/g, " ").replace(/\s+/g, " ").trim();
+  const text = chatText(cleaned);
+  if (!cleaned || cleaned.length < 4) return "";
+  if (/(hom nay|ngay mai|mai|qua|binh trung|hoang quoc viet|dia chi|gia|phi|dau|moi|lau|co|khong|kham|lich|sang|chieu|toi)/.test(text)) {
+    return "";
+  }
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  if (words.length >= 2 && words.length <= 5) return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
+  return "";
+}
+
+function detectAppointmentTime(rawText = "") {
+  const text = chatText(rawText);
+  const raw = rawText.trim();
+  const timeMatch = raw.match(/\b(\d{1,2})\s*(h|g|giờ|gio)(?:\s*(\d{1,2}))?\b/i);
+  const day = /ngay mai|mai/.test(text) ? "mai" : /hom nay|nay/.test(text) ? "hôm nay" : "";
+  if (timeMatch) {
+    const hour = timeMatch[1];
+    const minute = timeMatch[3] ? `${timeMatch[3]}p` : "";
+    return `${hour}h${minute}${day ? ` ${day}` : ""}`.trim();
+  }
+  if (/sang mai|mai sang/.test(text)) return "sáng mai";
+  if (/chieu mai|mai chieu/.test(text)) return "chiều mai";
+  if (/toi mai|mai toi/.test(text)) return "tối mai";
+  if (/lat|chut nua/.test(text)) return "lát nữa";
+  return "";
+}
+
 function isPriceQuestion(rawText) {
   const text = chatText(rawText);
   return /(gia|phi|chi phi|bao nhieu|bao nhiu|bao tien|bao nhieu tien|bn tien|mac|dat|dat khong|dat k|ton kem|bang gia|buoi le|phat sinh|ep mua|uu dai|chuong trinh|499|5 buoi|nam buoi|dung khong|nhu nao)/.test(text);
@@ -359,7 +397,7 @@ function isCostProcessQuestion(rawText) {
 
 function isAddressQuestion(rawText) {
   const text = chatText(rawText);
-  return /(dia chi|cho dia chi|cho xin dia chi|xin dia chi|o dau|kiem tra o dau|kham o dau|ben minh o dau|ben minh co kiem tra khong|co kiem tra khong)/.test(text);
+  return /(dia chi|cho dia chi|cho xin dia chi|xin dia chi|o dau|kiem tra o dau|kham o dau|ben minh o dau|ben minh co kiem tra khong|co kiem tra khong|so may|la so may|duong nao|so nha|dia chi cu the)/.test(text);
 }
 
 function isBookingIntent(rawText) {
@@ -524,6 +562,9 @@ function branchChoiceReply(state, rawText = "") {
   if (branch) state.preferredBranch = branch;
   const s = subject(state);
 
+  const bookingStatus = bookingInfoReply(state);
+  if (bookingStatus) return bookingStatus;
+
   if (state.bookingAsked || state.wantsBooking || state.priceSent || state.assessmentSent) {
     state.bookingAsked = true;
     state.stage = "booking_phone";
@@ -546,6 +587,9 @@ function updateStateFromText(state, rawText) {
   const trigger = detectTrigger(rawText);
   const radiation = detectRadiation(rawText);
   const treated = detectTreatment(rawText);
+  const phoneNumber = extractPhoneNumber(rawText);
+  const customerName = detectCustomerName(rawText);
+  const appointmentTime = detectAppointmentTime(rawText);
 
   if (pain) state.pain = pain;
   if (disease) state.disease = disease;
@@ -553,6 +597,12 @@ function updateStateFromText(state, rawText) {
   if (trigger) state.trigger = trigger;
   if (radiation) state.radiation = radiation;
   if (treated) state.treated = treated;
+  if (phoneNumber) state.phoneNumber = phoneNumber;
+  if (customerName) state.customerName = customerName;
+  if (appointmentTime) {
+    state.appointmentTime = appointmentTime;
+    state.wantsBooking = true;
+  }
 
   if (yesNo && state.lastQuestion === "radiation") state.radiation = yesNo;
   if (yesNo && state.lastQuestion === "treated") state.treated = yesNo === "không" ? "chưa" : "có";
@@ -599,6 +649,43 @@ function multiResult(state, messages, lastQuestion = "") {
 function handoff(reason = "") {
   if (reason) console.log("Silent handoff reason:", reason);
   return { action: "HANDOFF", message: "" };
+}
+
+function branchAddress(branch = "") {
+  if (/bình|binh/i.test(branch)) return "Dạ cơ sở Bình Trưng bên em ở 94 Đường 56, Bình Trưng, TP.HCM ạ.";
+  if (/hoàng|hoang|quốc|quoc/i.test(branch)) return "Dạ cơ sở Hoàng Quốc Việt bên em ở 33N Hoàng Quốc Việt, Tân Mỹ, TP.HCM ạ.";
+  return CLINIC.address;
+}
+
+function bookingInfoReply(state) {
+  if (!(state.bookingAsked || state.wantsBooking || state.priceSent || state.assessmentSent || state.preferredBranch || state.hasPhone)) return null;
+
+  if (state.customerName && state.phoneNumber && state.appointmentTime && state.preferredBranch) {
+    state.stage = "booking_confirmed";
+    return result(state, `Dạ em xác nhận lịch cho ${state.customerName} ${state.appointmentTime} tại cơ sở ${state.preferredBranch} rồi ạ.`);
+  }
+
+  if (state.phoneNumber && state.appointmentTime && state.preferredBranch && !state.customerName) {
+    state.stage = "booking_need_name";
+    return result(state, "Dạ mình cho em xin tên để em giữ lịch ạ?", "name");
+  }
+
+  if (state.customerName && state.appointmentTime && state.preferredBranch && !state.phoneNumber) {
+    state.stage = "booking_need_phone";
+    return result(state, "Dạ mình cho em xin SĐT để em giữ lịch ạ?", "phone");
+  }
+
+  if (state.customerName && state.phoneNumber && state.preferredBranch && !state.appointmentTime) {
+    state.stage = "booking_need_time";
+    return result(state, "Dạ mình muốn qua khoảng mấy giờ ạ?", "appointment_time");
+  }
+
+  if (state.customerName && state.phoneNumber && state.appointmentTime && !state.preferredBranch) {
+    state.stage = "booking_need_branch";
+    return result(state, "Dạ mình tiện cơ sở Hoàng Quốc Việt hay Bình Trưng ạ?", "ask_branch");
+  }
+
+  return null;
 }
 
 function askProblem(state) {
@@ -880,6 +967,9 @@ function questionToKey(question) {
 function addressReply(state) {
   state.addressSent = true;
   state.stage = "address_sent";
+  if (state.preferredBranch) {
+    return result(state, branchAddress(state.preferredBranch));
+  }
   if (state.assessmentSent || state.wantsBooking || state.priceSent) {
     return multiResult(state, [CLINIC.address, CLINIC.addressAsk], "ask_branch");
   }
@@ -894,9 +984,14 @@ function addressReply(state) {
 }
 
 function bookingReply(state, rawText = "") {
+  const bookingStatus = bookingInfoReply(state);
+  if (bookingStatus) return bookingStatus;
+
   if (state.hasPhone) {
     state.stage = "phone_captured";
-    return result(state, "Dạ em nhận được SĐT rồi ạ. Mình tiện cơ sở Hoàng Quốc Việt hay Bình Trưng để em giữ lịch?");
+    if (!state.preferredBranch) return result(state, "Dạ em nhận được SĐT rồi ạ. Mình tiện cơ sở Hoàng Quốc Việt hay Bình Trưng để em giữ lịch?");
+    if (!state.appointmentTime) return result(state, "Dạ em nhận được SĐT rồi ạ. Mình muốn qua khoảng mấy giờ ạ?", "appointment_time");
+    if (!state.customerName) return result(state, "Dạ em nhận được SĐT rồi ạ. Mình cho em xin tên để em giữ lịch ạ?", "name");
   }
 
   if (!state.bookingAsked) {
