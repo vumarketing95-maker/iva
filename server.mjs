@@ -172,6 +172,8 @@ function getCustomerState(senderId) {
       leadGroup: "unknown",
       temperature: "cold",
       nextGoal: "discover_need",
+      customerIntent: "unknown",
+      nextBestAction: "ask_problem",
       areaHint: "",
       preferredBranch: "",
       lastQuestion: "",
@@ -241,7 +243,7 @@ function triggerQuestion(state) {
   if (state.pain === "ngón tay cái") return `Dạ ${s} cầm nắm hoặc gập duỗi ngón cái có đau hơn không ạ?`;
   if (state.pain === "cổ tay") return `Dạ ${s} xoay cổ tay hoặc cầm nắm có đau hơn không ạ?`;
   if (state.pain === "tay") return `Dạ ${s} cầm nắm hoặc xoay tay có đau hơn không ạ?`;
-  return `Dạ ${s} đau sau vận động hay tự nhiên đau ạ?`;
+  return `Dạ phần này mình thấy đau hơn khi cử động hay lúc nghỉ cũng đau ạ?`;
 }
 
 function detectPersona(rawText, state) {
@@ -339,7 +341,7 @@ function isBookingIntent(rawText) {
 
 function isBranchChoice(rawText) {
   const text = chatText(rawText);
-  return /(binh trung|hoang quoc viet|quan 7|q7|tan my|duong 56|quan 9|q9|thu duc|tp thu duc|quan 2|q2|cat lai|an phu)/.test(text);
+  return /(binh trung|hoang quoc viet|quan 7|q7|tan my|tan hung|duong 56|quan 9|q9|thu duc|tp thu duc|quan 2|q2|cat lai|an phu)/.test(text);
 }
 
 function inferBranchFromText(rawText) {
@@ -347,7 +349,7 @@ function inferBranchFromText(rawText) {
   if (/(binh trung|duong 56|quan 9|q9|thu duc|tp thu duc|quan 2|q2|cat lai|an phu)/.test(text)) {
     return "Bình Trưng";
   }
-  if (/(hoang quoc viet|quan 7|q7|tan my|nha be|phu my hung|nguyen thi thap)/.test(text)) {
+  if (/(hoang quoc viet|quan 7|q7|tan my|tan hung|nha be|phu my hung|nguyen thi thap)/.test(text)) {
     return "Hoàng Quốc Việt";
   }
   return "";
@@ -360,7 +362,7 @@ function detectAreaHint(rawText) {
     return { area: rawText.trim(), branch: "Bình Trưng" };
   }
 
-  if (/(quan 7|q7|tan my|nha be|phu my hung|nguyen thi thap)/.test(text)) {
+  if (/(quan 7|q7|tan my|tan hung|nha be|phu my hung|nguyen thi thap)/.test(text)) {
     return { area: rawText.trim(), branch: "Hoàng Quốc Việt" };
   }
 
@@ -393,6 +395,24 @@ function isPing(rawText) {
 function isOutOfScopeQuestion(rawText) {
   const text = chatText(rawText);
   return /(ai dang tra loi|ai tu van|bot ha|robot ha|co phai ai|may tra loi|nguoi hay may|bac si nao|gio lam viec|may gio dong cua|may gio mo cua|buoi le|cam ket khoi|co khoi khong|massage thu gian|mat xa thu gian|ep mua|phat sinh gi|bao hanh|chac khoi)/.test(text);
+}
+
+function detectCustomerIntent(rawText, state) {
+  if (hasPhoneNumber(rawText)) return "leave_phone";
+  if (isOutOfScopeQuestion(rawText)) return "out_of_scope";
+  if (isPriceQuestion(rawText) && isAddressQuestion(rawText)) return "price_and_address";
+  if (isPriceQuestion(rawText) && isBookingIntent(rawText)) return "price_and_booking";
+  if (isAddressQuestion(rawText) && isBookingIntent(rawText)) return "address_and_booking";
+  if (isPriceQuestion(rawText)) return "price";
+  if (isAddressQuestion(rawText)) return "address";
+  if (isBookingIntent(rawText)) return "booking";
+  if (isBranchChoice(rawText) || detectAreaHint(rawText)) return state.assessmentSent || state.priceSent ? "branch_for_booking" : "area_or_branch";
+  if (isSpecificDiseaseQuestion(rawText)) return "specific_disease";
+  if (isMethodQuestion(rawText)) return "method";
+  if (isPing(rawText)) return "open_consult";
+  if (detectDisease(rawText)) return "known_disease";
+  if (detectPain(rawText)) return "symptom";
+  return "answer_followup";
 }
 
 function detectObjection(rawText) {
@@ -449,6 +469,13 @@ function classifyLead(state) {
   else if (state.assessmentSent) state.nextGoal = "move_to_price_or_booking";
   else if (hasSignal) state.nextGoal = "complete_assessment";
   else state.nextGoal = "discover_need";
+
+  if (state.nextGoal === "confirm_branch") state.nextBestAction = "confirm_branch";
+  else if (state.nextGoal === "book_appointment") state.nextBestAction = "ask_name_phone_or_branch";
+  else if (state.nextGoal === "present_offer") state.nextBestAction = "send_offer";
+  else if (state.nextGoal === "move_to_price_or_booking") state.nextBestAction = "answer_intent_then_close";
+  else if (state.nextGoal === "complete_assessment") state.nextBestAction = "ask_one_missing_or_assess";
+  else state.nextBestAction = "ask_problem";
 }
 
 function areaReply(state) {
@@ -521,6 +548,7 @@ function updateStateFromText(state, rawText) {
   const objection = detectObjection(rawText);
   if (objection) state.objection = objection;
 
+  state.customerIntent = detectCustomerIntent(rawText, state);
   classifyLead(state);
 }
 
@@ -545,7 +573,7 @@ function handoff(reason = "") {
 
 function askProblem(state) {
   state.stage = "asking_problem";
-  return result(state, "Dạ mình đang cần hỗ trợ đau/mỏi phần nào ạ?", "problem");
+  return result(state, "Dạ mình đang đau/mỏi phần nào ạ?", "problem");
 }
 
 function askDuration(state) {
@@ -688,7 +716,7 @@ function priceNeedInfoReply(state) {
     if (state.sentQuestionKeys.has("ask_trigger")) {
       return result(state, "Dạ em cần nắm thêm lúc nào mình đau hơn rồi mới báo sát phần ưu đãi được ạ.");
     }
-    return result(state, `Dạ ${s} đau sau vận động hay tự nhiên đau ạ?`, "price_trigger");
+    return result(state, `Dạ phần này mình thấy đau hơn khi cử động hay lúc nghỉ cũng đau ạ?`, "price_trigger");
   }
 
   if (!state.radiation && (state.pain === "vai" || state.pain === "vai gáy")) {
@@ -788,7 +816,7 @@ function nextQuestionTextBeforePrice(state) {
   if (!state.trigger && state.pain === "lưng") return `${capitalizeFirst(s)} ngồi lâu hoặc đi lại có thấy đau hơn không ạ?`;
   if (!state.trigger && state.pain === "ngón tay cái") return `${capitalizeFirst(s)} cầm nắm hoặc gập duỗi ngón cái có đau hơn không ạ?`;
   if (!state.trigger && state.pain === "cổ tay") return `${capitalizeFirst(s)} xoay cổ tay hoặc cầm nắm có đau hơn không ạ?`;
-  if (!state.trigger) return `${capitalizeFirst(s)} đau sau vận động hay tự nhiên đau ạ?`;
+  if (!state.trigger) return `Phần này mình thấy đau hơn khi cử động hay lúc nghỉ cũng đau ạ?`;
   if (!state.radiation && (state.pain === "vai" || state.pain === "vai gáy")) return `${capitalizeFirst(s)} có đau lan xuống tay hoặc tê tay không ạ?`;
   if (!state.radiation && state.pain === "lưng") return `${capitalizeFirst(s)} có đau lan xuống mông, chân hoặc tê chân không ạ?`;
   if (!state.radiation && state.pain === "ngón tay cái") return `${capitalizeFirst(s)} cầm nắm hoặc gập duỗi ngón cái có đau hơn không ạ?`;
@@ -937,6 +965,8 @@ function responseGuardSingle(state, rawMessage) {
   if (hasPronounConflict(state, message)) return handoff("blocked pronoun conflict");
   if (/\bban\b|quy khach|tinh trang cu the/.test(textValue)) return handoff("blocked robotic wording");
   if (message.length > 190) return handoff("blocked long message");
+  const intentCheck = responseMatchesIntent(state, textValue);
+  if (intentCheck) return handoff(intentCheck);
   if (state.pain && /vi tri nao|dau o dau/.test(textValue)) return handoff("blocked repeated pain location");
   if (state.duration && /bao lau|lau chua|keo dai/.test(textValue) && state.askedFields.has("duration")) return handoff("blocked repeated duration");
   if (state.trigger && /(van dong hay tu nhien|di lai hay ngoi lau)/.test(textValue) && state.askedFields.has("trigger")) return handoff("blocked repeated trigger");
@@ -951,6 +981,33 @@ function responseGuardSingle(state, rawMessage) {
   }
 
   return { action: "REPLY", message };
+}
+
+function responseMatchesIntent(state, textValue) {
+  const intent = state.customerIntent || "";
+
+  if (intent === "address" || intent === "address_and_booking" || intent === "price_and_address") {
+    const hasAddress = /33n|hoang quoc viet|94|duong 56|binh trung/.test(textValue);
+    const asksBranch = /hoang quoc viet hay binh trung|tien co so|gan co so/.test(textValue);
+    if (!hasAddress && !asksBranch) return "blocked intent mismatch: address requested";
+  }
+
+  if (intent === "booking" || intent === "price_and_booking" || intent === "branch_for_booking") {
+    const movesToBooking = /ten|sdt|so dien thoai|hoang quoc viet|binh trung|giu lich|qua duoc/.test(textValue);
+    if (!movesToBooking) return "blocked intent mismatch: booking requested";
+  }
+
+  if ((intent === "price" || intent === "price_and_booking" || intent === "price_and_address") && hasEnoughForPrice(state)) {
+    const hasOfferOrClose = /499|uu dai|chi phi|lo trinh|ten|sdt|giu lich|hoang quoc viet|binh trung|qua duoc/.test(textValue);
+    if (!hasOfferOrClose) return "blocked intent mismatch: price requested after enough info";
+  }
+
+  if (intent === "specific_disease") {
+    const hasDiseaseView = /nghieng ve|nhan dinh|co the|van de|thoat vi|thoai hoa|than kinh|cang co|viem gan|khop/.test(textValue);
+    if (!hasDiseaseView) return "blocked intent mismatch: specific disease requested";
+  }
+
+  return "";
 }
 
 function messageQuestionKey(message) {
@@ -1001,9 +1058,11 @@ function logLeadSignal(senderId, state, customerText, botMessage = "") {
     senderId,
     customerText,
     botMessage,
+    customerIntent: state.customerIntent,
     group: state.leadGroup,
     temperature: state.temperature,
     nextGoal: state.nextGoal,
+    nextBestAction: state.nextBestAction,
     stage: state.stage,
     areaHint: state.areaHint,
     preferredBranch: state.preferredBranch,
