@@ -352,6 +352,11 @@ function isPriceQuestion(rawText) {
   return /(gia|phi|chi phi|bao nhieu|bao nhiu|bao tien|bao nhieu tien|bn tien|mac|dat|dat khong|dat k|ton kem|bang gia|buoi le|phat sinh|ep mua|uu dai|chuong trinh|499|5 buoi|nam buoi|dung khong|nhu nao)/.test(text);
 }
 
+function isCostProcessQuestion(rawText) {
+  const text = chatText(rawText);
+  return /(phat sinh|ep mua|co ep|mua goi|bat buoc mua|bat mua|phai mua|co bi ep|co bat buoc)/.test(text);
+}
+
 function isAddressQuestion(rawText) {
   const text = chatText(rawText);
   return /(dia chi|cho dia chi|cho xin dia chi|xin dia chi|o dau|kiem tra o dau|kham o dau|ben minh o dau|ben minh co kiem tra khong|co kiem tra khong)/.test(text);
@@ -418,11 +423,12 @@ function isPing(rawText) {
 
 function isOutOfScopeQuestion(rawText) {
   const text = chatText(rawText);
-  return /(ai dang tra loi|ai tu van|bot ha|robot ha|co phai ai|may tra loi|nguoi hay may|bac si nao|gio lam viec|may gio dong cua|may gio mo cua|buoi le|cam ket khoi|co khoi khong|massage thu gian|mat xa thu gian|ep mua|phat sinh gi|bao hanh|chac khoi)/.test(text);
+  return /(ai dang tra loi|ai tu van|bot ha|robot ha|co phai ai|may tra loi|nguoi hay may|bac si nao|gio lam viec|may gio dong cua|may gio mo cua|buoi le|cam ket khoi|co khoi khong|massage thu gian|mat xa thu gian|bao hanh|chac khoi)/.test(text);
 }
 
 function detectCustomerIntent(rawText, state) {
   if (hasPhoneNumber(rawText)) return "leave_phone";
+  if (isCostProcessQuestion(rawText)) return "cost_process";
   if (isOutOfScopeQuestion(rawText)) return "out_of_scope";
   if (isPriceQuestion(rawText) && isAddressQuestion(rawText)) return "price_and_address";
   if (isPriceQuestion(rawText) && isBookingIntent(rawText)) return "price_and_booking";
@@ -771,6 +777,14 @@ function priceNeedInfoReply(state) {
   return handoff("price asked but missing unclear info");
 }
 
+function costProcessReply(state) {
+  state.stage = "cost_process_answered";
+  const answer = "Dạ sau khi khám bác sĩ sẽ trao đổi rõ lộ trình và chi phí, mình đồng ý thì mình làm ạ.";
+  if (hasEnoughForPrice(state) || state.assessmentSent) return result(state, answer);
+  const question = nextQuestionTextBeforePrice(state);
+  return multiResult(state, [answer, question], messageQuestionKey(question) || "cost_process_followup");
+}
+
 function priceAndAddressReply(state) {
   state.addressSent = true;
   state.stage = "price_and_address_sent";
@@ -947,6 +961,7 @@ function handleDeterministicFlow(senderId, customerText) {
   if (isPriceQuestion(customerText) && isBookingIntent(customerText)) return priceAndBookingReply(state, customerText);
   if (isPriceQuestion(customerText) && isAddressQuestion(customerText)) return priceAndAddressReply(state);
   if (isAddressQuestion(customerText) && isBookingIntent(customerText)) return addressAndBookingReply(state, customerText);
+  if (isCostProcessQuestion(customerText)) return costProcessReply(state);
   if (isBookingIntent(customerText)) return bookingReply(state, customerText);
   if (isAddressQuestion(customerText)) return addressReply(state);
   if (isSpecificDiseaseQuestion(customerText)) return specificDiseaseReply(state);
