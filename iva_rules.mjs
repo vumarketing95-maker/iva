@@ -85,6 +85,8 @@ LUẬT NHẬN ĐỊNH
 - Lưng + lan/tê chân: nghiêng về thoát vị đĩa đệm thắt lưng hoặc đau thần kinh tọa.
 - Lưng không lan/tê, sau tập/vận động: nghiêng về căng cơ hoặc vấn đề cột sống thắt lưng nhẹ.
 - Vai gáy mới đau, không lan/tê: nghiêng về căng cơ vùng vai gáy.
+- Đau lưng/thắt lưng tuyệt đối không được hỏi hoặc nhận định sang khớp gối nếu khách không nói gối. Với lưng chỉ hỏi/nhận định theo thắt lưng, mông, chân, tê chân.
+- Đau gối chỉ dùng khi khách nói rõ gối. Không tự suy từ câu "đi lại đau" thành khớp gối nếu vùng đau ban đầu là lưng.
 
 ĐỊNH DẠNG ĐẦU RA
 Chỉ trả JSON hợp lệ:

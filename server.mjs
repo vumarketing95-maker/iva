@@ -15,6 +15,7 @@ const MAX_REPLY_DELAY_MS = Number(process.env.MAX_REPLY_DELAY_MS || 6500);
 const conversations = new Map();
 const customerStates = new Map();
 const processedMessageIds = new Set();
+const humanTakenOverConversations = new Set();
 
 function parsePageTokens(rawValue) {
   if (!rawValue) return {};
@@ -39,8 +40,30 @@ function tokenForPage(pageId = "") {
   return pageToken || PAGE_ACCESS_TOKEN;
 }
 
+function tokenSourceForPage(pageId = "") {
+  if (pageId && PAGE_TOKENS[String(pageId)]) return "PAGE_TOKENS";
+  if (PAGE_ACCESS_TOKEN) return "PAGE_ACCESS_TOKEN_FALLBACK";
+  return "MISSING";
+}
+
 function conversationKey(pageId, senderId) {
   return `${pageId || "default"}:${senderId}`;
+}
+
+function markHumanTakeover(pageId, customerId, reason = "page echo") {
+  if (!pageId || !customerId) return;
+  const chatKey = conversationKey(pageId, customerId);
+  humanTakenOverConversations.add(chatKey);
+  const state = getCustomerState(chatKey);
+  state.humanTakeover = true;
+  state.stage = "human_takeover";
+  console.log("Human takeover locked", { chatKey, reason });
+}
+
+function isHumanTakenOver(chatKey) {
+  if (humanTakenOverConversations.has(chatKey)) return true;
+  const state = customerStates.get(chatKey);
+  return Boolean(state?.humanTakeover);
 }
 
 const CLINIC = {
@@ -183,6 +206,7 @@ function getCustomerState(senderId) {
       addressSent: false,
       bookingAsked: false,
       specificDiseaseAnswered: false,
+      humanTakeover: false,
       lastBotMessage: "",
       sentQuestionKeys: new Set(),
       messageCount: 0,
@@ -583,12 +607,26 @@ function askDuration(state) {
 }
 
 function askTrigger(state) {
-  if (state.trigger || state.askedFields.has("trigger")) return askRadiation(state);
+  if (state.trigger || state.askedFields.has("trigger")) {
+    return needsRadiationQuestion(state) ? askRadiation(state) : assessmentReply(state);
+  }
   state.stage = "asking_trigger";
   return result(state, triggerQuestion(state), "trigger");
 }
 
+function needsRadiationQuestion(state) {
+  return (
+    state.pain === "lưng" ||
+    state.pain === "vai" ||
+    state.pain === "vai gáy" ||
+    state.pain === "ngón tay cái" ||
+    state.pain === "cổ tay" ||
+    /(tọa|thoát vị|cổ)/.test(state.disease || "")
+  );
+}
+
 function askRadiation(state) {
+  if (!needsRadiationQuestion(state)) return assessmentReply(state);
   if (state.radiation || state.askedFields.has("radiation")) return assessmentReply(state);
   state.stage = "asking_radiation";
   const s = subject(state);
@@ -597,9 +635,6 @@ function askRadiation(state) {
   }
   if (state.pain === "vai" || state.pain === "vai gáy" || /cổ/.test(state.disease)) {
     return result(state, `Dạ ${s} có đau lan xuống tay hoặc tê tay không ạ?`, "radiation");
-  }
-  if (state.pain === "gối") {
-    return result(state, `Dạ ${s} đi lại có đau nhói hoặc cứng khớp không ạ?`, "radiation");
   }
   if (state.pain === "ngón tay cái") {
     return result(state, `Dạ ${s} cầm nắm hoặc gập duỗi ngón cái có đau hơn không ạ?`, "radiation");
@@ -881,7 +916,7 @@ function knownDiseaseFlow(state, customerText) {
 function symptomFlow(state) {
   if (!state.duration) return askDuration(state);
   if (!state.trigger) return askTrigger(state);
-  if (!state.radiation) return askRadiation(state);
+  if (needsRadiationQuestion(state) && !state.radiation) return askRadiation(state);
   if (state.askedPrice) return priceReply(state);
   return assessmentReply(state);
 }
@@ -974,6 +1009,14 @@ function responseGuardSingle(state, rawMessage) {
 
   if (state.pain === "lưng" && /(te tay|xuong tay)/.test(textValue)) {
     return handoff("blocked wrong region: back asked hand");
+  }
+
+  if (state.pain === "lưng" && /(khop goi|cung khop|dau nhoi)/.test(textValue)) {
+    return handoff("blocked wrong region: back asked knee/joint");
+  }
+
+  if (state.pain !== "gối" && /khop goi/.test(textValue)) {
+    return handoff("blocked wrong diagnosis: knee without knee pain");
   }
 
   if ((state.pain === "vai" || state.pain === "vai gáy") && /(te chan|xuong chan|xuong mong)/.test(textValue)) {
@@ -1133,6 +1176,7 @@ async function openaiReply(senderId, customerText) {
 
 async function graphApi(path, body, pageId = "") {
   const accessToken = tokenForPage(pageId);
+  const tokenSource = tokenSourceForPage(pageId);
   if (!accessToken) {
     console.error("Missing page token", { pageId });
     return;
@@ -1145,7 +1189,15 @@ async function graphApi(path, body, pageId = "") {
     body: JSON.stringify(body),
   });
 
-  if (!response.ok) console.error("Graph API error", response.status, await response.text());
+  if (!response.ok) {
+    console.error("Graph API error", response.status, {
+      pageId,
+      tokenSource,
+      recipientId: body?.recipient?.id || "",
+      graphPath: path,
+      error: await response.text(),
+    });
+  }
 }
 
 async function senderAction(recipientId, action, pageId = "") {
@@ -1180,7 +1232,16 @@ async function handleMessagingEvent(event) {
   const message = event.message;
 
   if (!senderId || !message) return;
-  if (message.is_echo) return;
+  if (message.is_echo) {
+    const echoPageId = event.sender?.id || "";
+    const echoCustomerId = event.recipient?.id || "";
+    if (!message.app_id) {
+      markHumanTakeover(echoPageId, echoCustomerId, "human/page echo");
+    } else {
+      console.log("Ignored app echo", { pageId: echoPageId, customerId: echoCustomerId, appId: message.app_id });
+    }
+    return;
+  }
   if (isDuplicate(message.mid)) return;
 
   const customerText = message.text?.trim();
@@ -1188,6 +1249,10 @@ async function handleMessagingEvent(event) {
 
   try {
     const chatKey = conversationKey(pageId, senderId);
+    if (isHumanTakenOver(chatKey)) {
+      console.log("AI skipped because human already took over", { chatKey, customerText });
+      return;
+    }
     await senderAction(senderId, "typing_on", pageId);
     const deterministic = handleDeterministicFlow(chatKey, customerText);
     const state = getCustomerState(chatKey);
