@@ -1132,6 +1132,9 @@ function responseGuardSingle(state, rawMessage) {
   if ((state.bookingAsked || state.wantsBooking || state.appointmentTime || state.phoneNumber) && /(dang dau phan nao|dau moi phan nao|bao lau|lau chua|ngoi lau|di lai|te tay|te chan|lan xuong)/.test(textValue)) {
     return handoff("blocked clinical question after booking context");
   }
+  if ((state.customerName || state.phoneNumber || state.appointmentTime || state.preferredBranch) && /(dang dau|dau moi|dau phan nao|dau lau|bi lau|co te|co lan|ngoi lau|di lai)/.test(textValue)) {
+    return handoff("blocked asking symptoms after appointment info captured");
+  }
 
   if (state.pain === "lưng" && /(te tay|xuong tay)/.test(textValue)) {
     return handoff("blocked wrong region: back asked hand");
@@ -1243,6 +1246,9 @@ function logLeadSignal(senderId, state, customerText, botMessage = "") {
     askedPrice: state.askedPrice,
     askedAddress: state.askedAddress,
     hasPhone: state.hasPhone,
+    customerName: state.customerName,
+    phoneNumber: state.phoneNumber ? "[captured]" : "",
+    appointmentTime: state.appointmentTime,
     priceSent: state.priceSent,
     addressSent: state.addressSent,
     bookingAsked: state.bookingAsked,
@@ -1250,13 +1256,18 @@ function logLeadSignal(senderId, state, customerText, botMessage = "") {
   });
 }
 
-async function openaiReply(senderId, customerText) {
-  if (!OPENAI_API_KEY) return handoff("missing OPENAI_API_KEY");
-
-  const history = getHistory(senderId);
-  const state = getCustomerState(senderId);
-  const brainContext = {
+function buildBrainContext(state, customerText) {
+  return {
     customerText,
+    mustThinkBeforeReply: [
+      "1. Khách vừa hỏi/nhắn điều gì thật sự?",
+      "2. Ý khách đang cần xử lý ngay là giá, địa chỉ, lịch, triệu chứng, SĐT, hay đổi/hoãn lịch?",
+      "3. Khách đã cung cấp thông tin nào rồi? Tuyệt đối không hỏi lại.",
+      "4. Nếu khách hỏi 2 ý trong 1 tin thì phải xử lý đủ 2 ý, ưu tiên ý chốt.",
+      "5. Lúc này nên trả lời thẳng, hỏi đúng 1 ý còn thiếu, xác nhận lịch, hay HANDOFF?",
+      "6. Câu sắp gửi có đúng vùng đau và đúng ngữ cảnh không?",
+      "7. Câu sắp gửi có làm khách thấy bị làm phiền, bị hỏi lại, hoặc bị máy móc không?",
+    ],
     intent: state.customerIntent,
     stage: state.stage,
     knownInfo: {
@@ -1274,21 +1285,38 @@ async function openaiReply(senderId, customerText) {
       bookingAsked: state.bookingAsked,
       preferredBranch: state.preferredBranch,
       customerName: state.customerName,
-      phoneNumber: state.phoneNumber,
+      hasPhoneNumber: Boolean(state.phoneNumber || state.hasPhone),
       appointmentTime: state.appointmentTime,
+    },
+    missingInfoForBooking: {
+      missingName: !state.customerName,
+      missingPhone: !(state.phoneNumber || state.hasPhone),
+      missingTime: !state.appointmentTime,
+      missingBranch: !state.preferredBranch,
     },
     nextGoal: state.nextGoal,
     nextBestAction: state.nextBestAction,
     hardRules: [
       "Trả lời đúng ý khách vừa hỏi trước, không quay lại sườn cũ.",
-      "Nếu hỏi địa chỉ/số mấy thì gửi địa chỉ.",
-      "Nếu đủ tên/SĐT/giờ/cơ sở thì xác nhận lịch.",
+      "Nếu khách hỏi địa chỉ/số mấy/đường nào thì gửi địa chỉ.",
+      "Nếu đủ tên/SĐT/giờ/cơ sở thì xác nhận lịch, không hỏi lại.",
+      "Nếu thiếu thông tin đặt lịch thì chỉ hỏi đúng phần thiếu.",
+      "Nếu khách hoãn/đổi/hủy lịch hoặc báo bận sau khi đã đặt lịch thì HANDOFF im lặng.",
       "Nếu khách hỏi giá sau khi đủ dấu hiệu thì báo ưu đãi 499k/5 buổi.",
-      "Không hỏi lặp lại.",
-      "Không sai vùng: lưng hỏi chân, cổ/vai gáy hỏi tay, gối hỏi gối.",
+      "Không hỏi lặp lại bất kỳ thông tin nào đã có trong knownInfo.",
+      "Không sai vùng: lưng hỏi mông/chân, cổ/vai gáy hỏi tay, gối hỏi gối.",
       "Nếu không chắc thì HANDOFF.",
     ],
   };
+}
+
+async function openaiReply(senderId, customerText) {
+  if (!OPENAI_API_KEY) return handoff("missing OPENAI_API_KEY");
+
+  const history = getHistory(senderId);
+  const state = getCustomerState(senderId);
+  const brainContext = buildBrainContext(state, customerText);
+  console.log("AI brain context:", brainContext);
   history.push({
     role: "user",
     content: `KHACH_NHAN: ${customerText}\nBO_NHO_VA_Y_DINH_NOI_BO: ${JSON.stringify(brainContext)}`,
@@ -1327,6 +1355,14 @@ async function openaiReply(senderId, customerText) {
     console.error("AI returned non-JSON:", outputText);
     parsed = { action: "HANDOFF", message: "" };
   }
+  console.log("AI brain output:", {
+    customerText,
+    action: parsed.action,
+    message: parsed.message || "",
+    intent: state.customerIntent,
+    stage: state.stage,
+    nextBestAction: state.nextBestAction,
+  });
 
   if (parsed.action === "REPLY" && parsed.message) {
     history.push({ role: "assistant", content: parsed.message });
@@ -1342,12 +1378,32 @@ async function smartReply(chatKey, customerText, deterministicReply = null) {
   const state = getCustomerState(chatKey);
   if (deterministicReply) {
     const guarded = responseGuard(state, deterministicReply);
-    if (guarded.action === "REPLY" && guarded.message) return guarded;
+    if (guarded.action === "REPLY" && guarded.message) {
+      console.log("Decision source: controlled_rule", {
+        chatKey,
+        customerText,
+        intent: state.customerIntent,
+        stage: state.stage,
+        nextBestAction: state.nextBestAction,
+        reply: guarded.message,
+      });
+      return guarded;
+    }
     console.log("Deterministic reply blocked, trying AI brain", { chatKey, reason: guarded.message || "guarded" });
   }
 
   const aiReply = await openaiReply(chatKey, customerText);
-  return responseGuard(state, aiReply);
+  const guardedAi = responseGuard(state, aiReply);
+  console.log("Decision source: ai_brain", {
+    chatKey,
+    customerText,
+    intent: state.customerIntent,
+    stage: state.stage,
+    nextBestAction: state.nextBestAction,
+    action: guardedAi.action,
+    reply: guardedAi.message || "",
+  });
+  return guardedAi;
 }
 
 async function graphApi(path, body, pageId = "") {
