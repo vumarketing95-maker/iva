@@ -1107,11 +1107,45 @@ function responseGuard(state, ai) {
   return { action: "REPLY", messages: guardedMessages, message: guardedMessages.join("\n") };
 }
 
+function painKey(value = "") {
+  const text = normalizeText(value);
+  if (/lung|that lung|song lung/.test(text)) return "lung";
+  if (/vai gay|co vai gay|co gay/.test(text)) return "vai_gay";
+  if (/vai/.test(text)) return "vai";
+  if (/goi|khop goi/.test(text)) return "goi";
+  if (/ngon tay cai|ngon cai/.test(text)) return "ngon_tay_cai";
+  if (/co tay/.test(text)) return "co_tay";
+  if (/tay/.test(text)) return "tay";
+  if (/hang|khop hang/.test(text)) return "hang";
+  return text;
+}
+
 function responseGuardSingle(state, rawMessage) {
   const message = rawMessage.trim();
   const textValue = normalizeText(message);
   const lastText = normalizeText(state.lastBotMessage || "");
   const questionKey = messageQuestionKey(message);
+  const currentPainKey = painKey(state.pain);
+
+  if (currentPainKey === "lung" && /(te tay|xuong tay|canh tay|co vai gay|vai gay)/.test(textValue)) {
+    return handoff("blocked wrong region: back reply mentioned neck/hand");
+  }
+
+  if (currentPainKey === "lung" && /(khop goi|van de khop goi|goi)/.test(textValue)) {
+    return handoff("blocked wrong diagnosis: back cannot become knee");
+  }
+
+  if (currentPainKey !== "goi" && /(khop goi|van de khop goi)/.test(textValue)) {
+    return handoff("blocked wrong diagnosis: knee without knee pain");
+  }
+
+  if ((currentPainKey === "vai" || currentPainKey === "vai_gay") && /(te chan|xuong chan|xuong mong|than kinh toa|that lung)/.test(textValue)) {
+    return handoff("blocked wrong region: neck/shoulder cannot become leg/back");
+  }
+
+  if ((currentPainKey === "ngon_tay_cai" || currentPainKey === "co_tay" || currentPainKey === "tay") && /(khop goi|than kinh toa|xuong mong|xuong chan)/.test(textValue)) {
+    return handoff("blocked wrong region: hand/arm reply drifted to another region");
+  }
 
   if (lastText && textValue === lastText) return handoff("blocked exact duplicate");
   if (questionKey && state.sentQuestionKeys.has(questionKey)) return handoff(`blocked repeated question key: ${questionKey}`);
