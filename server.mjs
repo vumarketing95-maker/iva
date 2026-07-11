@@ -206,6 +206,44 @@ function alignPronouns(state, message) {
     .replace(/\bmình\b/g, persona);
 }
 
+function pickTone(state, options) {
+  if (!options.length) return "";
+  const index = Math.abs((state.messageCount || 0) + (state.stage || "").length) % options.length;
+  return options[index];
+}
+
+function painPhrase(state) {
+  if (state.pain === "ngón tay cái") return "ngón cái";
+  if (state.pain === "cổ tay") return "cổ tay";
+  return state.pain || "phần này";
+}
+
+function durationQuestion(state) {
+  const s = subject(state);
+  if (state.disease) {
+    return pickTone(state, [
+      `Dạ ${s} bị lâu chưa ạ?`,
+      `Dạ tình trạng này của ${s} kéo dài lâu chưa ạ?`,
+    ]);
+  }
+  return pickTone(state, [
+    `Dạ ${s} đau ${painPhrase(state)} lâu chưa ạ?`,
+    `Dạ ${s} mới đau gần đây hay kéo dài rồi ạ?`,
+  ]);
+}
+
+function triggerQuestion(state) {
+  const s = subject(state);
+  if (state.pain === "lưng") return `Dạ ${s} ngồi lâu hoặc đi lại có thấy đau hơn không ạ?`;
+  if (state.pain === "gối") return `Dạ ${s} đi lại có đau nhiều hơn không ạ?`;
+  if (state.pain === "háng") return `Dạ ${s} đau khi đi lại hay lúc đứng lên ngồi xuống ạ?`;
+  if (state.pain === "vai" || state.pain === "vai gáy") return `Dạ ${s} ngồi lâu hoặc dùng điện thoại có nhanh mỏi hơn không ạ?`;
+  if (state.pain === "ngón tay cái") return `Dạ ${s} cầm nắm hoặc gập duỗi ngón cái có đau hơn không ạ?`;
+  if (state.pain === "cổ tay") return `Dạ ${s} xoay cổ tay hoặc cầm nắm có đau hơn không ạ?`;
+  if (state.pain === "tay") return `Dạ ${s} cầm nắm hoặc xoay tay có đau hơn không ạ?`;
+  return `Dạ ${s} đau sau vận động hay tự nhiên đau ạ?`;
+}
+
 function detectPersona(rawText, state) {
   const raw = rawText.toLowerCase();
   const text = chatText(rawText);
@@ -222,6 +260,8 @@ function detectPain(rawText) {
   if (/(that lung|dau lung|song lung|lung|te chan|than kinh toa)/.test(text)) return "lưng";
   if (/(dau goi|goi\b)/.test(text)) return "gối";
   if (/(hang|khop hang)/.test(text)) return "háng";
+  if (/(ngon tay cai|ngon cai|dau ngon tay|dau ngon cai)/.test(text)) return "ngón tay cái";
+  if (/(co tay|dau co tay)/.test(text)) return "cổ tay";
   if (/(khuyu tay|elbow|tennis elbow|dau tay|\btay\b)/.test(text)) return "tay";
   return "";
 }
@@ -248,6 +288,7 @@ function detectTrigger(rawText) {
   const text = chatText(rawText);
   if (/(di moi dau|di lai|di dung|di la dau|di thay dau|di lai thay dau|di lai.*dau)/.test(text)) return "đi lại đau";
   if (/(ngoi lau|ngoi lam viec|ngoi)/.test(text)) return "ngồi lâu đau";
+  if (/(cam nam|nam do|gap duoi|xoay tay|bam dien thoai|dung chuot|go phim)/.test(text)) return "cầm nắm đau";
   if (/(van dong|choi the thao|be nang|tap gym|tap|the thao)/.test(text)) return "vận động";
   if (/(tu nhien|tu dung)/.test(text)) return "tự nhiên";
   return "";
@@ -510,20 +551,13 @@ function askProblem(state) {
 function askDuration(state) {
   if (state.duration || state.askedFields.has("duration")) return askTrigger(state);
   state.stage = "asking_duration";
-  const s = subject(state);
-  if (state.disease) return result(state, `Dạ ${s} bị lâu chưa ạ?`, "duration");
-  return result(state, `Dạ ${s} đau ${state.pain || "phần này"} lâu chưa ạ?`, "duration");
+  return result(state, durationQuestion(state), "duration");
 }
 
 function askTrigger(state) {
   if (state.trigger || state.askedFields.has("trigger")) return askRadiation(state);
   state.stage = "asking_trigger";
-  const s = subject(state);
-  if (state.pain === "lưng") return result(state, `Dạ ${s} ngồi lâu hoặc đi lại có thấy đau hơn không ạ?`, "trigger");
-  if (state.pain === "gối") return result(state, `Dạ ${s} đi lại có đau nhiều hơn không ạ?`, "trigger");
-  if (state.pain === "háng") return result(state, `Dạ ${s} đau khi đi lại hay lúc đứng lên ngồi xuống ạ?`, "trigger");
-  if (state.pain === "vai" || state.pain === "vai gáy") return result(state, `Dạ ${s} ngồi lâu hoặc dùng điện thoại có nhanh mỏi hơn không ạ?`, "trigger");
-  return result(state, `Dạ ${s} đau sau vận động hay tự nhiên đau ạ?`, "trigger");
+  return result(state, triggerQuestion(state), "trigger");
 }
 
 function askRadiation(state) {
@@ -538,6 +572,12 @@ function askRadiation(state) {
   }
   if (state.pain === "gối") {
     return result(state, `Dạ ${s} đi lại có đau nhói hoặc cứng khớp không ạ?`, "radiation");
+  }
+  if (state.pain === "ngón tay cái") {
+    return result(state, `Dạ ${s} cầm nắm hoặc gập duỗi ngón cái có đau hơn không ạ?`, "radiation");
+  }
+  if (state.pain === "cổ tay") {
+    return result(state, `Dạ ${s} xoay cổ tay hoặc cầm nắm có đau hơn không ạ?`, "radiation");
   }
   if (state.pain === "tay") {
     return result(state, `Dạ ${s} còn đau khi cầm nắm hoặc xoay tay không ạ?`, "radiation");
@@ -559,6 +599,8 @@ function diseaseLabel(state) {
   if (state.pain === "vai" || state.pain === "vai gáy") return longTime ? "căng cơ vùng vai gáy hoặc vấn đề đốt sống cổ" : "căng cơ vùng vai gáy";
   if (state.pain === "gối") return "vấn đề khớp gối";
   if (state.pain === "háng") return "vấn đề khớp háng";
+  if (state.pain === "ngón tay cái") return hasRadiation ? "viêm gân hoặc vấn đề khớp vùng ngón cái" : "vấn đề gân/khớp vùng ngón cái";
+  if (state.pain === "cổ tay") return hasRadiation ? "viêm gân hoặc vấn đề khớp cổ tay" : "vấn đề cơ gân vùng cổ tay";
   if (state.pain === "tay") return sport ? "căng cơ/gân vùng tay do vận động" : "vấn đề cơ gân vùng tay";
   return "";
 }
@@ -717,6 +759,10 @@ function hasEnoughForPrice(state) {
     return Boolean(state.duration && state.trigger && state.radiation);
   }
 
+  if (state.pain === "ngón tay cái" || state.pain === "cổ tay") {
+    return Boolean(state.duration && state.trigger && state.radiation);
+  }
+
   if (state.pain === "gối" || state.pain === "háng" || state.pain === "tay") {
     return Boolean(state.duration && state.trigger);
   }
@@ -740,9 +786,13 @@ function nextQuestionTextBeforePrice(state) {
   }
   if (!state.trigger && state.pain === "vai gáy") return `${capitalizeFirst(s)} ngồi lâu hoặc dùng điện thoại có nhanh mỏi hơn không ạ?`;
   if (!state.trigger && state.pain === "lưng") return `${capitalizeFirst(s)} ngồi lâu hoặc đi lại có thấy đau hơn không ạ?`;
+  if (!state.trigger && state.pain === "ngón tay cái") return `${capitalizeFirst(s)} cầm nắm hoặc gập duỗi ngón cái có đau hơn không ạ?`;
+  if (!state.trigger && state.pain === "cổ tay") return `${capitalizeFirst(s)} xoay cổ tay hoặc cầm nắm có đau hơn không ạ?`;
   if (!state.trigger) return `${capitalizeFirst(s)} đau sau vận động hay tự nhiên đau ạ?`;
   if (!state.radiation && (state.pain === "vai" || state.pain === "vai gáy")) return `${capitalizeFirst(s)} có đau lan xuống tay hoặc tê tay không ạ?`;
   if (!state.radiation && state.pain === "lưng") return `${capitalizeFirst(s)} có đau lan xuống mông, chân hoặc tê chân không ạ?`;
+  if (!state.radiation && state.pain === "ngón tay cái") return `${capitalizeFirst(s)} cầm nắm hoặc gập duỗi ngón cái có đau hơn không ạ?`;
+  if (!state.radiation && state.pain === "cổ tay") return `${capitalizeFirst(s)} xoay cổ tay hoặc cầm nắm có đau hơn không ạ?`;
   return "Mình tiện qua hôm nay hay ngày mai ạ?";
 }
 
@@ -913,6 +963,7 @@ function messageQuestionKey(message) {
   if (/bi lau chua|dau .* lau chua/.test(textValue)) return "ask_duration";
   if (/van dong hay tu nhien|sau van dong hay tu nhien|di lai ngoi lau hay tu nhien|di lai hay ngoi lau/.test(textValue)) return "ask_trigger";
   if (/ngoi lau|dung dien thoai|di lai co thay dau hon|nhanh moi hon/.test(textValue)) return "ask_trigger";
+  if (/cam nam|gap duoi|xoay co tay|xoay tay/.test(textValue)) return "ask_hand_function";
   if (/lan xuong tay|te tay/.test(textValue)) return "ask_arm_radiation";
   if (/lan xuong mong|lan xuong chan|te chan/.test(textValue)) return "ask_leg_radiation";
   if (/dieu tri phuong phap nao|da dieu tri|da di dieu tri/.test(textValue)) return "ask_treatment";
