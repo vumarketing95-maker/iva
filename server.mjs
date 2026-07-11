@@ -69,7 +69,8 @@ function isHumanTakenOver(chatKey) {
 const CLINIC = {
   address:
     "Dạ IVA có 2 cơ sở: 33N Hoàng Quốc Việt, Tân Mỹ và 94 Đường 56, Bình Trưng ạ.",
-  addressAsk: "Mình tiện cơ sở nào để em giữ lịch cho mình?",
+  branchAsk: "Mình qua chi nhánh 1 Hoàng Quốc Việt hay chi nhánh 2 Bình Trưng ạ?",
+  addressAsk: "Mình qua chi nhánh 1 Hoàng Quốc Việt hay chi nhánh 2 Bình Trưng để em giữ lịch cho mình ạ?",
   price:
     "Sau khi khám bác sĩ sẽ trao đổi kỹ lộ trình và chi phí cho mình ạ. Đặt lịch online bên em đang có ưu đãi 499k/5 buổi trị liệu bấm huyệt.",
   priceClose: "Mình tiện qua hôm nay hay ngày mai ạ?",
@@ -554,7 +555,7 @@ function areaReply(state) {
     return result(state, `Dạ vậy ${s} tiện cơ sở ${state.preferredBranch} hơn ạ. ${capitalizeFirst(s)} đang cần kiểm tra đau/mỏi phần nào ạ?`, "problem");
   }
 
-  return result(state, `${CLINIC.address} Mình tiện cơ sở Hoàng Quốc Việt hay Bình Trưng hơn ạ?`, "branch_distance");
+  return result(state, `${CLINIC.address} ${CLINIC.branchAsk}`, "branch_distance");
 }
 
 function branchChoiceReply(state, rawText = "") {
@@ -682,7 +683,7 @@ function bookingInfoReply(state) {
 
   if (state.customerName && state.phoneNumber && state.appointmentTime && !state.preferredBranch) {
     state.stage = "booking_need_branch";
-    return result(state, "Dạ mình tiện cơ sở Hoàng Quốc Việt hay Bình Trưng ạ?", "ask_branch");
+    return result(state, `Dạ ${CLINIC.branchAsk}`, "ask_branch");
   }
 
   return null;
@@ -899,7 +900,7 @@ function priceAndBookingReply(state, rawText = "") {
 
   const text = chatText(rawText);
   const day = /ngay mai|mai/.test(text) ? "mai" : "hôm nay";
-  return multiResult(state, [CLINIC.price, `Dạ ${day} mình qua được ạ. Mình tiện Hoàng Quốc Việt hay Bình Trưng?`], "ask_branch");
+  return multiResult(state, [CLINIC.price, `Dạ ${day} mình qua được ạ. ${CLINIC.branchAsk}`], "ask_branch");
 }
 
 function addressAndBookingReply(state, rawText = "") {
@@ -908,7 +909,7 @@ function addressAndBookingReply(state, rawText = "") {
   state.stage = "address_then_booking";
   const text = chatText(rawText);
   const day = /ngay mai|mai/.test(text) ? "mai" : "hôm nay";
-  return multiResult(state, [CLINIC.address, `Dạ ${day} mình qua được ạ. Mình tiện Hoàng Quốc Việt hay Bình Trưng?`], "ask_branch");
+  return multiResult(state, [CLINIC.address, `Dạ ${day} mình qua được ạ. ${CLINIC.branchAsk}`], "ask_branch");
 }
 
 function hasEnoughForPrice(state) {
@@ -977,7 +978,7 @@ function addressReply(state) {
     state,
     [
       CLINIC.address,
-      "Mình gần cơ sở Hoàng Quốc Việt hay Bình Trưng hơn ạ?",
+      CLINIC.branchAsk,
     ],
     "branch_distance",
   );
@@ -989,7 +990,7 @@ function bookingReply(state, rawText = "") {
 
   if (state.hasPhone) {
     state.stage = "phone_captured";
-    if (!state.preferredBranch) return result(state, "Dạ em nhận được SĐT rồi ạ. Mình tiện cơ sở Hoàng Quốc Việt hay Bình Trưng để em giữ lịch?");
+    if (!state.preferredBranch) return result(state, `Dạ em nhận được SĐT rồi ạ. ${CLINIC.branchAsk}`);
     if (!state.appointmentTime) return result(state, "Dạ em nhận được SĐT rồi ạ. Mình muốn qua khoảng mấy giờ ạ?", "appointment_time");
     if (!state.customerName) return result(state, "Dạ em nhận được SĐT rồi ạ. Mình cho em xin tên để em giữ lịch ạ?", "name");
   }
@@ -999,7 +1000,7 @@ function bookingReply(state, rawText = "") {
     state.stage = "booking_branch";
     const text = chatText(rawText);
     const day = /ngay mai|mai/.test(text) ? "mai" : "hôm nay";
-    return result(state, `Dạ ${day} mình qua được ạ. Mình tiện Hoàng Quốc Việt hay Bình Trưng?`);
+    return result(state, `Dạ ${day} mình qua được ạ. ${CLINIC.branchAsk}`);
   }
 
   state.stage = "booking_phone";
@@ -1141,7 +1142,7 @@ function responseMatchesIntent(state, textValue) {
 
   if (intent === "address" || intent === "address_and_booking" || intent === "price_and_address") {
     const hasAddress = /33n|hoang quoc viet|94|duong 56|binh trung/.test(textValue);
-    const asksBranch = /hoang quoc viet hay binh trung|tien co so|gan co so/.test(textValue);
+    const asksBranch = /hoang quoc viet hay binh trung|chi nhanh 1|chi nhanh 2|tien co so|gan co so/.test(textValue);
     if (!hasAddress && !asksBranch) return "blocked intent mismatch: address requested";
   }
 
@@ -1177,7 +1178,7 @@ function messageQuestionKey(message) {
   if (/lan xuong tay|te tay/.test(textValue)) return "ask_arm_radiation";
   if (/lan xuong mong|lan xuong chan|te chan/.test(textValue)) return "ask_leg_radiation";
   if (/dieu tri phuong phap nao|da dieu tri|da di dieu tri/.test(textValue)) return "ask_treatment";
-  if (/co so hoang quoc viet hay binh trung|hoang quoc viet hay binh trung|tien co so nao|tien hoang quoc viet hay binh trung/.test(textValue)) return "ask_branch";
+  if (/co so hoang quoc viet hay binh trung|hoang quoc viet hay binh trung|chi nhanh 1|chi nhanh 2|tien co so nao|tien hoang quoc viet hay binh trung/.test(textValue)) return "ask_branch";
   if (/gan co so nao/.test(textValue)) return "ask_branch";
   if (/xin ten va sdt|cho em xin ten|so dien thoai/.test(textValue)) return "ask_phone";
   return "";
