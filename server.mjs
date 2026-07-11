@@ -407,6 +407,11 @@ function isBookingIntent(rawText) {
   return /(hom nay|ngay mai|mai toi qua|mai qua|may gio|lich may gio|co lich khong|co lich may gio|dat lich|giu lich|lich nhu the nao|qua duoc|qua dc|qua duoc khong|qua kham|toi qua duoc khong)/.test(text);
 }
 
+function isScheduleChangeOrDelay(rawText) {
+  const text = chatText(rawText);
+  return /(hoan|doi lich|doi gio|doi sang|doi chieu|doi ngay|huy lich|khong qua duoc|chua qua duoc|mai khong qua|hom nay khong qua|ban viec|co viec dot xuat|doi buoi|de hom khac|hen lai|qua tre|tre gio)/.test(text);
+}
+
 function isBranchChoice(rawText) {
   const text = chatText(rawText);
   return /(binh trung|hoang quoc viet|quan 7|q7|tan my|tan hung|duong 56|quan 9|q9|thu duc|tp thu duc|quan 2|q2|cat lai|an phu)/.test(text);
@@ -467,6 +472,7 @@ function isOutOfScopeQuestion(rawText) {
 
 function detectCustomerIntent(rawText, state) {
   if (hasPhoneNumber(rawText)) return "leave_phone";
+  if (isScheduleChangeOrDelay(rawText)) return "schedule_change";
   if (isCostProcessQuestion(rawText)) return "cost_process";
   if (isOutOfScopeQuestion(rawText)) return "out_of_scope";
   if (isPriceQuestion(rawText) && isAddressQuestion(rawText)) return "price_and_address";
@@ -1040,6 +1046,7 @@ function handleDeterministicFlow(senderId, customerText) {
   const currentArea = detectAreaHint(customerText);
 
   if (isOutOfScopeQuestion(customerText)) return handoff("out of scope needs human");
+  if (isScheduleChangeOrDelay(customerText)) return handoff("schedule change/delay needs human");
   if (hasPhoneNumber(customerText)) return bookingReply(state, customerText);
   if (
     isBranchChoice(customerText) &&
@@ -1114,9 +1121,17 @@ function responseGuardSingle(state, rawMessage) {
   const intentCheck = responseMatchesIntent(state, textValue);
   if (intentCheck) return handoff(intentCheck);
   if (state.pain && /vi tri nao|dau o dau/.test(textValue)) return handoff("blocked repeated pain location");
+  if (state.pain && /(dang dau phan nao|dau moi phan nao|can ho tro dau moi phan nao)/.test(textValue)) return handoff("blocked repeated known symptom");
   if (state.duration && /bao lau|lau chua|keo dai/.test(textValue) && state.askedFields.has("duration")) return handoff("blocked repeated duration");
   if (state.trigger && /(van dong hay tu nhien|di lai hay ngoi lau)/.test(textValue) && state.askedFields.has("trigger")) return handoff("blocked repeated trigger");
   if (state.radiation && /(lan dau|te khong|te tay|te chan)/.test(textValue) && state.askedFields.has("radiation")) return handoff("blocked repeated radiation");
+  if (state.phoneNumber && /(sdt|so dien thoai)/.test(textValue)) return handoff("blocked repeated phone request");
+  if (state.customerName && /cho em xin ten|xin ten/.test(textValue)) return handoff("blocked repeated name request");
+  if (state.appointmentTime && /may gio|khoang may gio/.test(textValue)) return handoff("blocked repeated appointment time request");
+  if (state.preferredBranch && /(chi nhanh 1|chi nhanh 2|hoang quoc viet hay binh trung|tien co so)/.test(textValue)) return handoff("blocked repeated branch request");
+  if ((state.bookingAsked || state.wantsBooking || state.appointmentTime || state.phoneNumber) && /(dang dau phan nao|dau moi phan nao|bao lau|lau chua|ngoi lau|di lai|te tay|te chan|lan xuong)/.test(textValue)) {
+    return handoff("blocked clinical question after booking context");
+  }
 
   if (state.pain === "lưng" && /(te tay|xuong tay)/.test(textValue)) {
     return handoff("blocked wrong region: back asked hand");
