@@ -475,6 +475,7 @@ function getCustomerState(senderId) {
       humanTakeover: false,
       lastBotMessage: "",
       sentQuestionKeys: new Set(),
+      sentMessageFingerprints: new Set(),
       messageCount: 0,
     });
   }
@@ -1472,6 +1473,83 @@ function responseGuard(state, ai) {
   return { action: "REPLY", messages: guardedMessages, message: guardedMessages.join("\n") };
 }
 
+function messageFingerprint(message = "") {
+  return normalizeText(message).slice(0, 180);
+}
+
+function isPriceOfferMessage(message = "") {
+  const text = normalizeText(message);
+  return /(499|189|800|uu dai|5 buoi|nam buoi|phi kham|chi phi|gia goc|ho tro 100|mien phi kham|khong ton phi|dat lich online)/.test(text);
+}
+
+function isAddressAnswerMessage(message = "") {
+  const text = normalizeText(message);
+  return /(33n|hoang quoc viet|94 duong 56|binh trung|chi nhanh 1|chi nhanh 2|co so 1|co so 2)/.test(text);
+}
+
+function finalReplyGate(chatKey, pageId, senderId, customerText, messages, stateBeforeReply = {}) {
+  const state = getCustomerState(chatKey);
+  if (!state.sentMessageFingerprints) state.sentMessageFingerprints = new Set();
+
+  const combined = messages.join("\n");
+  const combinedText = normalizeText(combined);
+  const customer = chatText(customerText);
+  const askedAddressNow = isAddressQuestion(customerText);
+  const askedPriceNow = isPriceQuestion(customerText);
+  const hasPriceOffer = messages.some(isPriceOfferMessage);
+
+  if (isHumanTakenOver(chatKey) || state.humanTakeover) {
+    return { ok: false, reason: "final gate: human takeover" };
+  }
+
+  if (isCustomerEndingOrDeclining(customerText)) {
+    lockConversation(pageId, senderId, "final gate: customer ended/declined", customerText);
+    return { ok: false, reason: "final gate: customer ended/declined" };
+  }
+
+  if (isCustomerReplyingToHumanPrice(customerText, stateBeforeReply)) {
+    lockConversation(pageId, senderId, "final gate: customer replied to human price", customerText);
+    return { ok: false, reason: "final gate: customer replied to human price" };
+  }
+
+  if (askedAddressNow && !isAddressAnswerMessage(combined)) {
+    return { ok: false, reason: "final gate: customer asked address but reply has no address" };
+  }
+
+  if (hasPriceOffer) {
+    if (stateBeforeReply.priceSent) return { ok: false, reason: "final gate: repeated price" };
+    if (!askedPriceNow && !isBookingIntent(customerText) && !stateBeforeReply.askedPrice) {
+      return { ok: false, reason: "final gate: price without customer price/booking intent" };
+    }
+  }
+
+  if (/gia goc|800|189|phi kham|chi kham thoi|khong ton phi/.test(customer) && hasPriceOffer) {
+    lockConversation(pageId, senderId, "final gate: human price thread detected", customerText);
+    return { ok: false, reason: "final gate: human price thread detected" };
+  }
+
+  for (const message of messages) {
+    const fp = messageFingerprint(message);
+    if (fp && state.sentMessageFingerprints.has(fp)) {
+      return { ok: false, reason: "final gate: repeated exact/near message" };
+    }
+    const questionKey = messageQuestionKey(message);
+    if (questionKey && state.sentQuestionKeys.has(questionKey)) {
+      return { ok: false, reason: `final gate: repeated question ${questionKey}` };
+    }
+  }
+
+  if (state.pain && /(minh dang bi dau phan nao|minh dau phan nao|dau vung nao|dau o dau|vi tri nao)/.test(combinedText)) {
+    return { ok: false, reason: "final gate: asked pain again after known pain" };
+  }
+
+  if (state.duration && /(lau chua|bao lau|keo dai bao lau)/.test(combinedText)) {
+    return { ok: false, reason: "final gate: asked duration again after known duration" };
+  }
+
+  return { ok: true, reason: "" };
+}
+
 function painKey(value = "") {
   const text = normalizeText(value);
   if (/lung|that lung|song lung/.test(text)) return "lung";
@@ -1910,11 +1988,20 @@ async function handleMessagingEvent(event) {
     const chatKey = conversationKey(pageId, senderId);
     recordChatEvent("customer", { pageId, chatKey, senderId, text: customerText });
     const stateBeforeReply = getCustomerState(chatKey);
+    const stateBeforeReplySnapshot = {
+      askedPrice: Boolean(stateBeforeReply.askedPrice),
+      askedAddress: Boolean(stateBeforeReply.askedAddress),
+      priceSent: Boolean(stateBeforeReply.priceSent),
+      addressSent: Boolean(stateBeforeReply.addressSent),
+      bookingAsked: Boolean(stateBeforeReply.bookingAsked),
+      assessmentSent: Boolean(stateBeforeReply.assessmentSent),
+      humanTakeover: Boolean(stateBeforeReply.humanTakeover),
+    };
     if (isCustomerEndingOrDeclining(customerText)) {
       lockConversation(pageId, senderId, "customer ended/declined - do not continue", customerText);
       return;
     }
-    if (isCustomerReplyingToHumanPrice(customerText, stateBeforeReply)) {
+    if (isCustomerReplyingToHumanPrice(customerText, stateBeforeReplySnapshot)) {
       lockConversation(pageId, senderId, "customer is replying to human price - do not quote again", customerText);
       return;
     }
@@ -1936,6 +2023,12 @@ async function handleMessagingEvent(event) {
     }
 
     const messagesToSend = Array.isArray(guarded.messages) ? guarded.messages : [guarded.message];
+    const finalGate = finalReplyGate(chatKey, pageId, senderId, customerText, messagesToSend, stateBeforeReplySnapshot);
+    if (!finalGate.ok) {
+      console.log("AI final gate blocked reply", { chatKey, reason: finalGate.reason, messagesToSend });
+      recordChatEvent("handoff", { pageId, chatKey, senderId, text: customerText, reason: finalGate.reason, attemptedReply: messagesToSend.join(" | "), state: stateSnapshot(state) });
+      return;
+    }
     for (const outgoingMessage of messagesToSend) {
       await delay(naturalDelay(outgoingMessage));
       if (isHumanTakenOver(chatKey)) {
@@ -1949,6 +2042,8 @@ async function handleMessagingEvent(event) {
       state.lastBotMessage = outgoingMessage;
       const sentQuestionKey = messageQuestionKey(outgoingMessage);
       if (sentQuestionKey) state.sentQuestionKeys.add(sentQuestionKey);
+      if (!state.sentMessageFingerprints) state.sentMessageFingerprints = new Set();
+      state.sentMessageFingerprints.add(messageFingerprint(outgoingMessage));
     }
     logLeadSignal(chatKey, state, customerText, messagesToSend.join(" | "));
   } catch (error) {
