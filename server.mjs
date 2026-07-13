@@ -1,5 +1,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { IVA_SYSTEM_PROMPT, DEFAULT_HISTORY } from "./iva_rules.mjs";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -11,6 +13,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const MIN_REPLY_DELAY_MS = Number(process.env.MIN_REPLY_DELAY_MS || 2500);
 const MAX_REPLY_DELAY_MS = Number(process.env.MAX_REPLY_DELAY_MS || 6500);
+const CHAT_LOG_DIR = process.env.CHAT_LOG_DIR || path.join(process.cwd(), "iva-chat-logs");
+const REPORT_TOKEN = process.env.REPORT_TOKEN || VERIFY_TOKEN;
 
 const conversations = new Map();
 const customerStates = new Map();
@@ -51,13 +55,14 @@ function conversationKey(pageId, senderId) {
   return `${pageId || "default"}:${senderId}`;
 }
 
-function markHumanTakeover(pageId, customerId, reason = "page echo") {
+function markHumanTakeover(pageId, customerId, reason = "page echo", humanText = "") {
   if (!pageId || !customerId) return;
   const chatKey = conversationKey(pageId, customerId);
   humanTakenOverConversations.add(chatKey);
   const state = getCustomerState(chatKey);
   state.humanTakeover = true;
   state.stage = "human_takeover";
+  recordChatEvent("human_takeover", { pageId, chatKey, senderId: customerId, text: humanText, reason, state: stateSnapshot(state) });
   console.log("Human takeover locked", { chatKey, reason });
 }
 
@@ -139,6 +144,210 @@ function text(res, status, payload) {
 function html(res, status, payload) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
   res.end(payload);
+}
+
+function ensureChatLogDir() {
+  try {
+    fs.mkdirSync(CHAT_LOG_DIR, { recursive: true });
+  } catch (error) {
+    console.error("Cannot create chat log dir:", error.message);
+  }
+}
+
+function chatLogFile(date = new Date()) {
+  const day = date.toISOString().slice(0, 10);
+  return path.join(CHAT_LOG_DIR, `${day}.jsonl`);
+}
+
+function maskPrivateText(value = "") {
+  return String(value || "").replace(/(\+?84|0)(\d[\s.-]?){8,10}\d/g, "[phone]");
+}
+
+function stateSnapshot(state = {}) {
+  return {
+    intent: state.customerIntent || "",
+    stage: state.stage || "",
+    group: state.leadGroup || "",
+    temperature: state.temperature || "",
+    pain: state.pain || "",
+    disease: state.disease || "",
+    duration: state.duration || "",
+    trigger: state.trigger || "",
+    radiation: state.radiation || "",
+    askedPrice: Boolean(state.askedPrice),
+    askedAddress: Boolean(state.askedAddress),
+    priceSent: Boolean(state.priceSent),
+    addressSent: Boolean(state.addressSent),
+    bookingAsked: Boolean(state.bookingAsked),
+    assessmentSent: Boolean(state.assessmentSent),
+    humanTakeover: Boolean(state.humanTakeover),
+  };
+}
+
+function recordChatEvent(type, payload = {}) {
+  try {
+    ensureChatLogDir();
+    const row = {
+      at: new Date().toISOString(),
+      type,
+      pageId: payload.pageId || "",
+      chatKey: payload.chatKey || "",
+      senderId: payload.senderId || "",
+      text: maskPrivateText(payload.text || ""),
+      reason: payload.reason || "",
+      state: payload.state || null,
+    };
+    fs.appendFileSync(chatLogFile(), `${JSON.stringify(row)}\n`, "utf8");
+  } catch (error) {
+    console.error("Cannot write chat log:", error.message);
+  }
+}
+
+function readRecentChatRows(days = 7) {
+  const rows = [];
+  for (let i = 0; i < days; i += 1) {
+    const date = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+    const file = chatLogFile(date);
+    if (!fs.existsSync(file)) continue;
+    const lines = fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean);
+    for (const line of lines.slice(-3000)) {
+      try {
+        rows.push(JSON.parse(line));
+      } catch {
+        // skip bad line
+      }
+    }
+  }
+  return rows.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+}
+
+function addCount(map, key = "khác") {
+  const cleanKey = key || "khác";
+  map.set(cleanKey, (map.get(cleanKey) || 0) + 1);
+}
+
+function topCounts(map, limit = 12) {
+  return [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
+}
+
+function detectReportTopic(text = "") {
+  if (isPriceQuestion(text)) return "hỏi giá/chi phí";
+  if (isAddressQuestion(text)) return "hỏi địa chỉ";
+  if (isBookingIntent(text)) return "hỏi lịch/đặt lịch";
+  if (isOutcomeQuestion(text)) return "hỏi hiệu quả/liệu trình";
+  if (isCostProcessQuestion(text)) return "hỏi phát sinh/ép mua";
+  if (isCustomerCorrection(text)) return "khách sửa lại/bắt lỗi";
+  const disease = detectDisease(text);
+  if (disease) return `bệnh lý: ${disease}`;
+  const pain = detectPain(text);
+  if (pain) return `triệu chứng: ${pain}`;
+  if (isPing(text)) return "chào/tư vấn chung";
+  return "khác";
+}
+
+function botRiskFlags(row, previousBotByChat) {
+  const flags = [];
+  const textValue = normalizeText(row.text || "");
+  const state = row.state || {};
+  const lastBot = previousBotByChat.get(row.chatKey);
+  if (lastBot && normalizeText(lastBot) === textValue) flags.push("lặp y nguyên");
+  if (/\bban\b|quy khach|tinh trang cu the|vi tri nao|dau o dau/.test(textValue)) flags.push("ngôn từ/rập khuôn");
+  if (state.pain === "lưng" && /(khop goi|co vai gay|te tay|xuong tay)/.test(textValue)) flags.push("sai vùng đau");
+  if ((state.pain === "cổ tay" || state.pain === "ngón tay cái" || state.pain === "tay") && /(di lai|dung len ngoi xuong|khop hang|khop goi|than kinh toa)/.test(textValue)) flags.push("sai luồng tay/cổ tay");
+  if ((state.intent === "address" || state.intent === "price_and_address") && !/(33n|94|hoang quoc viet|binh trung|chi nhanh)/.test(textValue)) flags.push("khách hỏi địa chỉ nhưng chưa trả lời thẳng");
+  if (state.intent === "price" && state.assessmentSent && !/(499|uu dai|chi phi|lo trinh)/.test(textValue)) flags.push("khách hỏi giá sau đánh giá nhưng chưa báo ưu đãi");
+  return flags;
+}
+
+function reportHtml(rows) {
+  const customerTopics = new Map();
+  const pains = new Map();
+  const intents = new Map();
+  const botRisks = new Map();
+  const examples = [];
+  const humanExamples = [];
+  const previousBotByChat = new Map();
+  const chatSet = new Set();
+  let customerMessages = 0;
+  let botMessages = 0;
+  let handoffs = 0;
+  let humanLocks = 0;
+
+  for (const row of rows) {
+    if (row.chatKey) chatSet.add(row.chatKey);
+    if (row.type === "customer") {
+      customerMessages += 1;
+      addCount(customerTopics, detectReportTopic(row.text));
+      const pain = detectPain(row.text);
+      if (pain) addCount(pains, pain);
+      const intent = detectReportTopic(row.text);
+      addCount(intents, intent);
+    }
+    if (row.type === "bot") {
+      botMessages += 1;
+      const flags = botRiskFlags(row, previousBotByChat);
+      for (const flag of flags) addCount(botRisks, flag);
+      if (flags.length && examples.length < 20) {
+        examples.push({ at: row.at, chatKey: row.chatKey, flags, text: row.text });
+      }
+      previousBotByChat.set(row.chatKey, row.text || "");
+    }
+    if (row.type === "handoff") handoffs += 1;
+    if (row.type === "human_takeover") {
+      humanLocks += 1;
+      if (row.text && humanExamples.length < 80) {
+        humanExamples.push({ at: row.at, chatKey: row.chatKey, reason: row.reason, text: row.text });
+      }
+    }
+  }
+
+  const esc = (v = "") => String(v).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+  const list = (items) => items.length ? items.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v}</td></tr>`).join("") : `<tr><td colspan="2">Chưa có dữ liệu</td></tr>`;
+  const exampleList = examples.length
+    ? examples.map((item) => `<li><b>${esc(item.flags.join(", "))}</b><br><small>${esc(item.at)} | ${esc(item.chatKey)}</small><br>${esc(item.text)}</li>`).join("")
+    : "<li>Chưa phát hiện lỗi nổi bật trong dữ liệu đã lưu.</li>";
+  const humanList = humanExamples.length
+    ? humanExamples.map((item) => `<li><b>${esc(item.text)}</b><br><small>${esc(item.at)} | ${esc(item.chatKey)} | ${esc(item.reason)}</small></li>`).join("")
+    : "<li>Chưa có nội dung người thật nhắn được ghi nhận.</li>";
+
+  return `<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Báo cáo chatpage IVA</title>
+  <style>
+    body{font-family:Arial,sans-serif;background:#f8fafc;color:#0f172a;margin:0;padding:24px}
+    .wrap{max-width:1100px;margin:auto}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+    .card,table,ol{background:white;border:1px solid #e2e8f0;border-radius:12px;padding:16px}
+    .num{font-size:30px;font-weight:700}
+    table{width:100%;border-collapse:collapse;margin:12px 0 24px}
+    td,th{border-bottom:1px solid #e2e8f0;padding:10px;text-align:left}
+    h1{margin-top:0}.muted{color:#64748b}li{margin-bottom:14px}
+  </style>
+</head>
+<body><div class="wrap">
+  <h1>Báo cáo rà soát chatpage IVA</h1>
+  <p class="muted">Dữ liệu lấy từ log bot trong 7 ngày gần nhất. Số điện thoại đã được ẩn bớt.</p>
+  <div class="grid">
+    <div class="card"><div class="num">${chatSet.size}</div><div>Cuộc chat</div></div>
+    <div class="card"><div class="num">${customerMessages}</div><div>Tin khách</div></div>
+    <div class="card"><div class="num">${botMessages}</div><div>Tin bot</div></div>
+    <div class="card"><div class="num">${handoffs}</div><div>Lần bot dừng</div></div>
+    <div class="card"><div class="num">${humanLocks}</div><div>Khóa khi người thật nhắn</div></div>
+  </div>
+  <h2>Khách hay hỏi/chia sẻ gì</h2>
+  <table><tr><th>Nhóm nội dung</th><th>Số lần</th></tr>${list(topCounts(customerTopics))}</table>
+  <h2>Vùng đau được nhắc nhiều</h2>
+  <table><tr><th>Vùng đau</th><th>Số lần</th></tr>${list(topCounts(pains))}</table>
+  <h2>Lỗi/rủi ro bot cần xem</h2>
+  <table><tr><th>Loại rủi ro</th><th>Số lần</th></tr>${list(topCounts(botRisks))}</table>
+  <h2>Nội dung người thật đã nhắn</h2>
+  <ol>${humanList}</ol>
+  <h2>Đoạn cần rà lại</h2>
+  <ol>${exampleList}</ol>
+</div></body></html>`;
 }
 
 const privacyPolicyHtml = `<!doctype html>
@@ -1637,7 +1846,7 @@ async function handleMessagingEvent(event) {
 
   if (!senderId || !message) return;
   if (!message.is_echo && isKnownPageId(senderId) && event.recipient?.id) {
-    markHumanTakeover(senderId, event.recipient.id, "page message without echo");
+    markHumanTakeover(senderId, event.recipient.id, "page message without echo", message.text?.trim() || "");
     return;
   }
   if (message.is_echo) {
@@ -1648,7 +1857,7 @@ async function handleMessagingEvent(event) {
       console.log("Ignored bot echo", { pageId: echoPageId, customerId: echoCustomerId, appId: message.app_id || "" });
       return;
     }
-    markHumanTakeover(echoPageId, echoCustomerId, `page echo not sent by bot${message.app_id ? " with app_id" : ""}`);
+    markHumanTakeover(echoPageId, echoCustomerId, `page echo not sent by bot${message.app_id ? " with app_id" : ""}`, echoText);
     return;
   }
   if (isDuplicate(message.mid)) return;
@@ -1658,8 +1867,10 @@ async function handleMessagingEvent(event) {
 
   try {
     const chatKey = conversationKey(pageId, senderId);
+    recordChatEvent("customer", { pageId, chatKey, senderId, text: customerText });
     if (isHumanTakenOver(chatKey)) {
       console.log("AI skipped because human already took over", { chatKey, customerText });
+      recordChatEvent("handoff", { pageId, chatKey, senderId, text: customerText, reason: "human already took over" });
       return;
     }
     await senderAction(senderId, "typing_on", pageId);
@@ -1669,6 +1880,7 @@ async function handleMessagingEvent(event) {
 
     if (guarded.action !== "REPLY" || !guarded.message) {
       logLeadSignal(chatKey, state, customerText, "");
+      recordChatEvent("handoff", { pageId, chatKey, senderId, text: customerText, reason: guarded.message || "silent handoff", state: stateSnapshot(state) });
       await senderAction(senderId, "typing_off", pageId);
       return;
     }
@@ -1678,6 +1890,7 @@ async function handleMessagingEvent(event) {
       await delay(naturalDelay(outgoingMessage));
       rememberBotEcho(pageId, senderId, outgoingMessage);
       await sendMessage(senderId, outgoingMessage, pageId);
+      recordChatEvent("bot", { pageId, chatKey, senderId, text: outgoingMessage, state: stateSnapshot(state) });
       state.lastBotMessage = outgoingMessage;
       const sentQuestionKey = messageQuestionKey(outgoingMessage);
       if (sentQuestionKey) state.sentQuestionKeys.add(sentQuestionKey);
@@ -1737,6 +1950,12 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && (url.pathname === "/privacy-policy" || url.pathname === "/data-deletion")) {
       return html(res, 200, privacyPolicyHtml);
+    }
+
+    if (req.method === "GET" && url.pathname === "/report") {
+      const token = url.searchParams.get("token") || "";
+      if (REPORT_TOKEN && token !== REPORT_TOKEN) return text(res, 403, "Forbidden");
+      return html(res, 200, reportHtml(readRecentChatRows(7)));
     }
 
     if (req.method === "GET" && url.pathname === "/webhook") return handleWebhookVerify(req, res, url);
