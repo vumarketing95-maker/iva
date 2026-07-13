@@ -66,6 +66,27 @@ function markHumanTakeover(pageId, customerId, reason = "page echo", humanText =
   console.log("Human takeover locked", { chatKey, reason });
 }
 
+function lockConversation(pageId, customerId, reason = "conversation locked", customerText = "") {
+  if (!pageId || !customerId) return;
+  const chatKey = conversationKey(pageId, customerId);
+  humanTakenOverConversations.add(chatKey);
+  const state = getCustomerState(chatKey);
+  state.humanTakeover = true;
+  state.stage = "conversation_locked";
+  recordChatEvent("conversation_locked", { pageId, chatKey, senderId: customerId, text: customerText, reason, state: stateSnapshot(state) });
+  console.log("Conversation locked", { chatKey, reason });
+}
+
+function lockChatKey(chatKey, reason = "conversation locked", customerText = "") {
+  if (!chatKey) return;
+  humanTakenOverConversations.add(chatKey);
+  const state = getCustomerState(chatKey);
+  state.humanTakeover = true;
+  state.stage = "conversation_locked";
+  recordChatEvent("conversation_locked", { chatKey, text: customerText, reason, state: stateSnapshot(state) });
+  console.log("Conversation locked", { chatKey, reason });
+}
+
 function isHumanTakenOver(chatKey) {
   if (humanTakenOverConversations.has(chatKey)) return true;
   const state = customerStates.get(chatKey);
@@ -663,6 +684,17 @@ function isBookingIntent(rawText) {
 function isScheduleChangeOrDelay(rawText) {
   const text = chatText(rawText);
   return /(hoan|doi lich|doi gio|doi sang|doi chieu|doi ngay|huy lich|khong qua duoc|chua qua duoc|mai khong qua|hom nay khong qua|ban viec|co viec dot xuat|doi buoi|de hom khac|hen lai|qua tre|tre gio)/.test(text);
+}
+
+function isCustomerEndingOrDeclining(rawText) {
+  const text = chatText(rawText);
+  return /(cam on|cảm ơn|thoi|thoi de|de minh thu xep|de minh tu xep|tu thu xep|thu xep sau|de sau|khong can|ko can|k can|khong tu van nua|k tu van nua|bo qua|khoi|de minh di mo|di mo luon|mo luon|di mo cho tien|khong lam|k lam|khong dat|k dat|tu van vay duoc roi|duoc roi em|vay thoi|sap xep duoc se qua|neu sap xep duoc|de toi tinh|de minh tinh)/.test(text);
+}
+
+function isCustomerReplyingToHumanPrice(rawText, state = {}) {
+  const text = chatText(rawText);
+  if (state.priceSent) return false;
+  return /(gia goc|gia gốc|800|189|mien phi kham|miễn phí khám|ho tro 100|hỗ trợ 100|mung sinh nhat|mừng sinh nhật|chi kham thoi|chỉ khám thôi|da bao gia|đã báo giá|phi kham dc ho tro|phí khám dc hỗ trợ|khong ton phi|không tốn phí)/.test(text);
 }
 
 function isBranchChoice(rawText) {
@@ -1367,6 +1399,14 @@ function handleDeterministicFlow(senderId, customerText) {
   const currentDisease = detectDisease(customerText);
   const currentArea = detectAreaHint(customerText);
 
+  if (isCustomerEndingOrDeclining(customerText)) {
+    lockChatKey(senderId, "customer ended/declined inside deterministic flow", customerText);
+    return handoff("customer ended/declined");
+  }
+  if (isCustomerReplyingToHumanPrice(customerText, state)) {
+    lockChatKey(senderId, "customer replied to human price inside deterministic flow", customerText);
+    return handoff("customer replied to human price");
+  }
   if (isOutOfScopeQuestion(customerText)) return handoff("out of scope needs human");
   if (isScheduleChangeOrDelay(customerText)) return handoff("schedule change/delay needs human");
   if (hasPhoneNumber(customerText)) return bookingReply(state, customerText);
@@ -1869,6 +1909,15 @@ async function handleMessagingEvent(event) {
   try {
     const chatKey = conversationKey(pageId, senderId);
     recordChatEvent("customer", { pageId, chatKey, senderId, text: customerText });
+    const stateBeforeReply = getCustomerState(chatKey);
+    if (isCustomerEndingOrDeclining(customerText)) {
+      lockConversation(pageId, senderId, "customer ended/declined - do not continue", customerText);
+      return;
+    }
+    if (isCustomerReplyingToHumanPrice(customerText, stateBeforeReply)) {
+      lockConversation(pageId, senderId, "customer is replying to human price - do not quote again", customerText);
+      return;
+    }
     if (isHumanTakenOver(chatKey)) {
       console.log("AI skipped because human already took over", { chatKey, customerText });
       recordChatEvent("handoff", { pageId, chatKey, senderId, text: customerText, reason: "human already took over" });
