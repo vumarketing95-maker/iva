@@ -16,6 +16,7 @@ const conversations = new Map();
 const customerStates = new Map();
 const processedMessageIds = new Set();
 const humanTakenOverConversations = new Set();
+const recentBotEchoes = new Map();
 
 function parsePageTokens(rawValue) {
   if (!rawValue) return {};
@@ -64,6 +65,36 @@ function isHumanTakenOver(chatKey) {
   if (humanTakenOverConversations.has(chatKey)) return true;
   const state = customerStates.get(chatKey);
   return Boolean(state?.humanTakeover);
+}
+
+function isKnownPageId(id = "") {
+  const value = String(id || "").trim();
+  if (!value) return false;
+  return Object.prototype.hasOwnProperty.call(PAGE_TOKENS, value);
+}
+
+function botEchoKey(pageId, customerId, text = "") {
+  return `${conversationKey(pageId, customerId)}::${normalizeText(text).slice(0, 220)}`;
+}
+
+function rememberBotEcho(pageId, customerId, text = "") {
+  if (!pageId || !customerId || !text) return;
+  const key = botEchoKey(pageId, customerId, text);
+  recentBotEchoes.set(key, Date.now());
+  if (recentBotEchoes.size > 1000) {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [echoKey, createdAt] of recentBotEchoes) {
+      if (createdAt < cutoff) recentBotEchoes.delete(echoKey);
+    }
+  }
+}
+
+function isKnownBotEcho(pageId, customerId, text = "") {
+  const key = botEchoKey(pageId, customerId, text);
+  const createdAt = recentBotEchoes.get(key);
+  if (!createdAt) return false;
+  recentBotEchoes.delete(key);
+  return Date.now() - createdAt < 10 * 60 * 1000;
 }
 
 const CLINIC = {
@@ -285,6 +316,8 @@ function detectPersona(rawText, state) {
 
 function detectPain(rawText) {
   const text = chatText(rawText);
+  if (isUnclearJointComplaint(rawText)) return "";
+  if (/(hoi chung ong co tay|ong co tay|te dau ngon tay|te ngon tay|te dau ngon|te ngon cai|te dau ngon cai)/.test(text)) return "cổ tay";
   if (/(co vai gay|vai gay|dau vai gay|co gay|te tay)/.test(text)) return "vai gáy";
   if (/(dau vai|vai\b)/.test(text)) return "vai";
   if (/(that lung|dau lung|song lung|lung|te chan|than kinh toa)/.test(text)) return "lưng";
@@ -296,8 +329,17 @@ function detectPain(rawText) {
   return "";
 }
 
+function isUnclearJointComplaint(rawText) {
+  const text = chatText(rawText);
+  const mentionsJoint = /(dau khop|moi khop|nhuc khop|viem khop|thoai hoa khop|khop bi dau|khop dau)/.test(text);
+  if (!mentionsJoint) return false;
+  const hasSpecificJoint = /(vai|gay|co|lung|that lung|goi|hang|co tay|ngon tay|ngon cai|khuyu tay|tay|chan|mong|mat ca|ban chan|khuu tay)/.test(text);
+  return !hasSpecificJoint;
+}
+
 function detectDisease(rawText) {
   const text = chatText(rawText);
+  if (/(hoi chung ong co tay|ong co tay)/.test(text)) return "hội chứng ống cổ tay";
   if (/thoat vi/.test(text)) return "thoát vị đĩa đệm";
   if (/than kinh toa/.test(text)) return "đau thần kinh tọa";
   if (/thoai hoa/.test(text)) return "thoái hóa";
@@ -326,6 +368,7 @@ function detectTrigger(rawText) {
 
 function detectRadiation(rawText) {
   const text = chatText(rawText);
+  if (/(te chu khong phai dau|te hon|te buot|te dau ngon|te ngon tay|te ngon cai)/.test(text)) return "tay";
   if (/(te tay|lan xuong tay|moi tay|dau dau)/.test(text)) return "tay";
   if (/(te chan|lan xuong chan|lan xuong mong|xuong mong|moi chan|dau xuong mong)/.test(text)) return "chân";
   if (/^(co|uh|u|vang|da co|co em|vang em|da|co a|co chi)$/.test(text)) return "có";
@@ -460,6 +503,21 @@ function isMethodQuestion(rawText) {
   return /(phuong phap|pp nao|dieu tri the nao|tri lieu the nao|co nhung pp|co may gi|vat ly tri lieu)/.test(text);
 }
 
+function isOutcomeQuestion(rawText) {
+  const text = chatText(rawText);
+  return /(lieu trinh|5 buoi|nam buoi|co that su|co het|het khong|co khoi|khoi khong|cai thien|hieu qua|do khong|giam khong)/.test(text);
+}
+
+function isCustomerCorrection(rawText) {
+  const text = chatText(rawText);
+  return /(khong phai|ko phai|k phai|te chu khong phai dau|nham|bam nham|xl|xin loi)/.test(text);
+}
+
+function isNumbnessComplaint(rawText) {
+  const text = chatText(rawText);
+  return /(te buot|te dau ngon|te ngon tay|te ngon cai|te tay|hoi chung ong co tay|ong co tay|te chu khong phai dau)/.test(text);
+}
+
 function isPing(rawText) {
   const text = chatText(rawText);
   return /^(alo|hello|helo|hi|chao|tu van|can tu van|em oi|e oi|co ai khong)$/.test(text);
@@ -473,6 +531,8 @@ function isOutOfScopeQuestion(rawText) {
 function detectCustomerIntent(rawText, state) {
   if (hasPhoneNumber(rawText)) return "leave_phone";
   if (isScheduleChangeOrDelay(rawText)) return "schedule_change";
+  if (isCustomerCorrection(rawText)) return "customer_correction";
+  if (isOutcomeQuestion(rawText)) return "outcome_question";
   if (isCostProcessQuestion(rawText)) return "cost_process";
   if (isOutOfScopeQuestion(rawText)) return "out_of_scope";
   if (isPriceQuestion(rawText) && isAddressQuestion(rawText)) return "price_and_address";
@@ -600,6 +660,20 @@ function updateStateFromText(state, rawText) {
 
   if (pain) state.pain = pain;
   if (disease) state.disease = disease;
+  if (isNumbnessComplaint(rawText)) {
+    state.pain = "cổ tay";
+    state.radiation = "tay";
+    if (!state.disease && /ong co tay|hoi chung ong co tay/.test(chatText(rawText))) {
+      state.disease = "hội chứng ống cổ tay";
+    }
+    if (/khong phai dau|ko phai dau|k phai dau|te chu/.test(chatText(rawText))) {
+      state.trigger = "";
+    }
+  }
+  if (!pain && /(te chu khong phai dau|te hon|te buot|te dau ngon|te ngon tay|te ngon cai|ong co tay)/.test(chatText(rawText))) {
+    if (state.pain === "háng" || state.pain === "gối" || !state.pain) state.pain = "cổ tay";
+    if (!state.disease && /ong co tay/.test(chatText(rawText))) state.disease = "hội chứng ống cổ tay";
+  }
   if (duration) state.duration = duration;
   if (trigger) state.trigger = trigger;
   if (radiation) state.radiation = radiation;
@@ -698,6 +772,44 @@ function bookingInfoReply(state) {
 function askProblem(state) {
   state.stage = "asking_problem";
   return result(state, "Dạ mình đang đau/mỏi phần nào ạ?", "problem");
+}
+
+function askWhichJoint(state) {
+  state.stage = "asking_joint_area";
+  return result(state, "Dạ mình đau khớp nào ạ?", "joint_area");
+}
+
+function outcomeQuestionReply(state, rawText = "") {
+  const s = subject(state);
+  state.stage = "answering_outcome";
+  if (isNumbnessComplaint(rawText) || painKey(state.pain) === "co_tay" || painKey(state.pain) === "ngon_tay_cai" || painKey(state.pain) === "tay") {
+    state.pain = state.pain || "cổ tay";
+    state.radiation = state.radiation || "tay";
+    if (!state.duration) {
+      return result(state, "Dạ 5 buổi là gói hỗ trợ cải thiện ban đầu, mức phục hồi còn tùy nguyên nhân tê của mình. Mình bị tê đầu ngón tay lâu chưa ạ?", "duration");
+    }
+    state.assessmentSent = true;
+    return result(state, `Dạ 5 buổi là gói hỗ trợ cải thiện ban đầu, mức phục hồi còn tùy nguyên nhân tê và mức độ của ${s}. Mình nên qua để bác sĩ kiểm tra kỹ hơn ạ.`);
+  }
+  if (!state.duration && (state.pain || state.disease)) {
+    return result(state, `Dạ mức cải thiện còn tùy nguyên nhân và mức độ của ${s}. Tình trạng này mình bị lâu chưa ạ?`, "duration");
+  }
+  return result(state, `Dạ mức cải thiện còn tùy nguyên nhân và mức độ của ${s}. Mình nên qua để bác sĩ kiểm tra kỹ hơn ạ.`);
+}
+
+function customerCorrectionReply(state, rawText = "") {
+  const text = chatText(rawText);
+  const s = subject(state);
+  if (/(xl|xin loi|bam nham|nham)/.test(text)) return handoff("manual correction/apology needs human");
+  if (isNumbnessComplaint(rawText) || /khong phai dau|ko phai dau|k phai dau|te chu/.test(text)) {
+    state.pain = "cổ tay";
+    state.radiation = "tay";
+    state.stage = "customer_corrected_numbness";
+    if (!state.duration) return result(state, "Dạ em hiểu rồi ạ, mình là tê đầu ngón tay chứ không phải đau. Mình bị tê lâu chưa ạ?", "duration");
+    state.assessmentSent = true;
+    return result(state, `Dạ em hiểu rồi ạ, mình là tê đầu ngón tay. Dấu hiệu này có thể liên quan ống cổ tay hoặc chèn ép thần kinh vùng cổ tay, ${s} nên qua để bác sĩ kiểm tra kỹ hơn ạ.`);
+  }
+  return handoff("customer corrected bot but meaning unclear");
 }
 
 function askDuration(state) {
@@ -1048,6 +1160,9 @@ function handleDeterministicFlow(senderId, customerText) {
   if (isOutOfScopeQuestion(customerText)) return handoff("out of scope needs human");
   if (isScheduleChangeOrDelay(customerText)) return handoff("schedule change/delay needs human");
   if (hasPhoneNumber(customerText)) return bookingReply(state, customerText);
+  if (isCustomerCorrection(customerText)) return customerCorrectionReply(state, customerText);
+  if (isOutcomeQuestion(customerText)) return outcomeQuestionReply(state, customerText);
+  if (isUnclearJointComplaint(customerText) && !state.pain) return askWhichJoint(state);
   if (
     isBranchChoice(customerText) &&
     !currentPain &&
@@ -1147,6 +1262,10 @@ function responseGuardSingle(state, rawMessage) {
     return handoff("blocked wrong region: hand/arm reply drifted to another region");
   }
 
+  if ((currentPainKey === "ngon_tay_cai" || currentPainKey === "co_tay" || currentPainKey === "tay") && /(di lai|dung len ngoi xuong|khop hang|vung hang|dau hang|vai gay)/.test(textValue)) {
+    return handoff("blocked wrong region: hand/arm cannot ask hip/walking/neck");
+  }
+
   if (lastText && textValue === lastText) return handoff("blocked exact duplicate");
   if (questionKey && state.sentQuestionKeys.has(questionKey)) return handoff(`blocked repeated question key: ${questionKey}`);
   if (hasPronounConflict(state, message)) return handoff("blocked pronoun conflict");
@@ -1221,6 +1340,7 @@ function messageQuestionKey(message) {
   if (/dau o vung nao|dang dau o vung nao|vi tri nao|dau o dau/.test(textValue)) return "ask_problem_location";
   if (/dang dau phan nao|dau phan nao/.test(textValue)) return "ask_problem_location";
   if (/dau moi phan nao|can ho tro dau moi/.test(textValue)) return "ask_problem_location";
+  if (/dau khop nao|khop nao/.test(textValue)) return "ask_joint_area";
   if (/bao dung phan uu dai|bao dung uu dai/.test(textValue)) return "ask_price_problem";
   if (/bao lau|lau chua|keo dai/.test(textValue)) return "ask_duration";
   if (/bi lau chua|dau .* lau chua/.test(textValue)) return "ask_duration";
@@ -1338,6 +1458,7 @@ function buildBrainContext(state, customerText) {
       "Nếu khách hoãn/đổi/hủy lịch hoặc báo bận sau khi đã đặt lịch thì HANDOFF im lặng.",
       "Nếu khách hỏi giá sau khi đủ dấu hiệu thì báo ưu đãi 499k/5 buổi.",
       "Không hỏi lặp lại bất kỳ thông tin nào đã có trong knownInfo.",
+      "Nếu khách chỉ nói đau khớp/viêm khớp nhưng chưa nói khớp nào thì hỏi 'Dạ mình đau khớp nào ạ?', không tự hiểu là khớp gối.",
       "Không sai vùng: lưng hỏi mông/chân, cổ/vai gáy hỏi tay, gối hỏi gối.",
       "Nếu không chắc thì HANDOFF.",
     ],
@@ -1411,6 +1532,16 @@ async function openaiReply(senderId, customerText) {
 async function smartReply(chatKey, customerText, deterministicReply = null) {
   const state = getCustomerState(chatKey);
   if (deterministicReply) {
+    if (deterministicReply.action !== "REPLY") {
+      console.log("Decision source: controlled_stop", {
+        chatKey,
+        customerText,
+        intent: state.customerIntent,
+        stage: state.stage,
+        reason: deterministicReply.message || "handoff",
+      });
+      return deterministicReply;
+    }
     const guarded = responseGuard(state, deterministicReply);
     if (guarded.action === "REPLY" && guarded.message) {
       console.log("Decision source: controlled_rule", {
@@ -1423,7 +1554,14 @@ async function smartReply(chatKey, customerText, deterministicReply = null) {
       });
       return guarded;
     }
-    console.log("Deterministic reply blocked, trying AI brain", { chatKey, reason: guarded.message || "guarded" });
+    console.log("Decision source: controlled_guard_stop", {
+      chatKey,
+      customerText,
+      intent: state.customerIntent,
+      stage: state.stage,
+      reason: guarded.message || "guarded",
+    });
+    return guarded;
   }
 
   const aiReply = await openaiReply(chatKey, customerText);
@@ -1498,14 +1636,19 @@ async function handleMessagingEvent(event) {
   const message = event.message;
 
   if (!senderId || !message) return;
+  if (!message.is_echo && isKnownPageId(senderId) && event.recipient?.id) {
+    markHumanTakeover(senderId, event.recipient.id, "page message without echo");
+    return;
+  }
   if (message.is_echo) {
     const echoPageId = event.sender?.id || "";
     const echoCustomerId = event.recipient?.id || "";
-    if (!message.app_id) {
-      markHumanTakeover(echoPageId, echoCustomerId, "human/page echo");
-    } else {
-      console.log("Ignored app echo", { pageId: echoPageId, customerId: echoCustomerId, appId: message.app_id });
+    const echoText = message.text?.trim() || "";
+    if (isKnownBotEcho(echoPageId, echoCustomerId, echoText)) {
+      console.log("Ignored bot echo", { pageId: echoPageId, customerId: echoCustomerId, appId: message.app_id || "" });
+      return;
     }
+    markHumanTakeover(echoPageId, echoCustomerId, `page echo not sent by bot${message.app_id ? " with app_id" : ""}`);
     return;
   }
   if (isDuplicate(message.mid)) return;
@@ -1533,6 +1676,7 @@ async function handleMessagingEvent(event) {
     const messagesToSend = Array.isArray(guarded.messages) ? guarded.messages : [guarded.message];
     for (const outgoingMessage of messagesToSend) {
       await delay(naturalDelay(outgoingMessage));
+      rememberBotEcho(pageId, senderId, outgoingMessage);
       await sendMessage(senderId, outgoingMessage, pageId);
       state.lastBotMessage = outgoingMessage;
       const sentQuestionKey = messageQuestionKey(outgoingMessage);
