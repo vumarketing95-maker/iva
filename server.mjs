@@ -75,7 +75,8 @@ function isHumanTakenOver(chatKey) {
 function isKnownPageId(id = "") {
   const value = String(id || "").trim();
   if (!value) return false;
-  return Object.prototype.hasOwnProperty.call(PAGE_TOKENS, value);
+  if (Object.prototype.hasOwnProperty.call(PAGE_TOKENS, value)) return true;
+  return value === process.env.PAGE_ID || value === process.env.PAGE_ID_PAGE_CU || value === process.env.PAGE_ID_PAGE_MOI;
 }
 
 function botEchoKey(pageId, customerId, text = "") {
@@ -1888,6 +1889,11 @@ async function handleMessagingEvent(event) {
     const messagesToSend = Array.isArray(guarded.messages) ? guarded.messages : [guarded.message];
     for (const outgoingMessage of messagesToSend) {
       await delay(naturalDelay(outgoingMessage));
+      if (isHumanTakenOver(chatKey)) {
+        console.log("AI send cancelled because human took over during delay", { chatKey });
+        recordChatEvent("handoff", { pageId, chatKey, senderId, text: outgoingMessage, reason: "cancelled before send: human takeover", state: stateSnapshot(state) });
+        return;
+      }
       rememberBotEcho(pageId, senderId, outgoingMessage);
       await sendMessage(senderId, outgoingMessage, pageId);
       recordChatEvent("bot", { pageId, chatKey, senderId, text: outgoingMessage, state: stateSnapshot(state) });
