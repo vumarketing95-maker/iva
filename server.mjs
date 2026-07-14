@@ -14,12 +14,13 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const MIN_REPLY_DELAY_MS = Number(process.env.MIN_REPLY_DELAY_MS || 2500);
 const MAX_REPLY_DELAY_MS = Number(process.env.MAX_REPLY_DELAY_MS || 6500);
 const CHAT_LOG_DIR = process.env.CHAT_LOG_DIR || path.join(process.cwd(), "iva-chat-logs");
+const HUMAN_LOCK_FILE = process.env.HUMAN_LOCK_FILE || path.join(process.cwd(), "iva-human-locks.json");
 const REPORT_TOKEN = process.env.REPORT_TOKEN || VERIFY_TOKEN;
 
 const conversations = new Map();
 const customerStates = new Map();
 const processedMessageIds = new Set();
-const humanTakenOverConversations = new Set();
+const humanTakenOverConversations = loadHumanTakeovers();
 const recentBotEchoes = new Map();
 
 function parsePageTokens(rawValue) {
@@ -40,6 +41,26 @@ function parsePageTokens(rawValue) {
 
 const PAGE_TOKENS = parsePageTokens(PAGE_TOKENS_RAW);
 
+function loadHumanTakeovers() {
+  try {
+    if (!fs.existsSync(HUMAN_LOCK_FILE)) return new Set();
+    const parsed = JSON.parse(fs.readFileSync(HUMAN_LOCK_FILE, "utf8"));
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.map(String).filter(Boolean));
+  } catch (error) {
+    console.error("Cannot load human takeover locks:", error.message);
+    return new Set();
+  }
+}
+
+function saveHumanTakeovers() {
+  try {
+    fs.writeFileSync(HUMAN_LOCK_FILE, JSON.stringify([...humanTakenOverConversations], null, 2));
+  } catch (error) {
+    console.error("Cannot save human takeover locks:", error.message);
+  }
+}
+
 function tokenForPage(pageId = "") {
   const pageToken = pageId ? PAGE_TOKENS[String(pageId)] : "";
   return pageToken || PAGE_ACCESS_TOKEN;
@@ -59,6 +80,7 @@ function markHumanTakeover(pageId, customerId, reason = "page echo", humanText =
   if (!pageId || !customerId) return;
   const chatKey = conversationKey(pageId, customerId);
   humanTakenOverConversations.add(chatKey);
+  saveHumanTakeovers();
   const state = getCustomerState(chatKey);
   state.humanTakeover = true;
   state.stage = "human_takeover";
@@ -70,6 +92,7 @@ function lockConversation(pageId, customerId, reason = "conversation locked", cu
   if (!pageId || !customerId) return;
   const chatKey = conversationKey(pageId, customerId);
   humanTakenOverConversations.add(chatKey);
+  saveHumanTakeovers();
   const state = getCustomerState(chatKey);
   state.humanTakeover = true;
   state.stage = "conversation_locked";
@@ -80,6 +103,7 @@ function lockConversation(pageId, customerId, reason = "conversation locked", cu
 function lockChatKey(chatKey, reason = "conversation locked", customerText = "") {
   if (!chatKey) return;
   humanTakenOverConversations.add(chatKey);
+  saveHumanTakeovers();
   const state = getCustomerState(chatKey);
   state.humanTakeover = true;
   state.stage = "conversation_locked";
@@ -1410,7 +1434,10 @@ function handleDeterministicFlow(senderId, customerText) {
   }
   if (isOutOfScopeQuestion(customerText)) return handoff("out of scope needs human");
   if (isScheduleChangeOrDelay(customerText)) return handoff("schedule change/delay needs human");
-  if (hasPhoneNumber(customerText)) return bookingReply(state, customerText);
+  if (hasPhoneNumber(customerText)) {
+    lockChatKey(senderId, "phone received inside deterministic flow - human follow up only", customerText);
+    return handoff("phone received - human follow up only");
+  }
   if (isCustomerCorrection(customerText)) return customerCorrectionReply(state, customerText);
   if (isOutcomeQuestion(customerText)) return outcomeQuestionReply(state, customerText);
   if (isUnclearJointComplaint(customerText) && !state.pain) return askWhichJoint(state);
@@ -2003,6 +2030,15 @@ async function handleMessagingEvent(event) {
     }
     if (isCustomerReplyingToHumanPrice(customerText, stateBeforeReplySnapshot)) {
       lockConversation(pageId, senderId, "customer is replying to human price - do not quote again", customerText);
+      return;
+    }
+    if (hasPhoneNumber(customerText)) {
+      const phoneNumber = extractPhoneNumber(customerText);
+      stateBeforeReply.phoneNumber = phoneNumber;
+      stateBeforeReply.hasPhone = true;
+      stateBeforeReply.stage = "phone_captured_human_followup";
+      recordChatEvent("lead_phone", { pageId, chatKey, senderId, text: customerText, phoneNumber: "[captured]", reason: "phone received - human follow up only", state: stateSnapshot(stateBeforeReply) });
+      lockConversation(pageId, senderId, "phone received - stop bot for human follow up", customerText);
       return;
     }
     if (isHumanTakenOver(chatKey)) {
