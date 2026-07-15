@@ -574,11 +574,11 @@ function detectPain(rawText) {
   const text = chatText(rawText);
   if (isUnclearJointComplaint(rawText)) return "";
   if (/(hoi chung ong co tay|ong co tay|te dau ngon tay|te ngon tay|te dau ngon|te ngon cai|te dau ngon cai)/.test(text)) return "cổ tay";
-  if (/(co vai gay|vai gay|dau vai gay|co gay|te tay)/.test(text)) return "vai gáy";
+  if (/(co vai gay|vai gay|dau vai gay|co gay|dau vung co|vung co|dau co|mo co|te tay)/.test(text)) return "vai gáy";
   if (/(dau vai|vai\b)/.test(text)) return "vai";
   if (/(that lung|dau lung|song lung|lung|te chan|than kinh toa)/.test(text)) return "lưng";
   if (/(dau goi|goi\b)/.test(text)) return "gối";
-  if (/(hang|khop hang)/.test(text)) return "háng";
+  if (/(khop hang|dau hang|vung hang|\bhang\b)/.test(text)) return "háng";
   if (/(ngon tay cai|ngon cai|dau ngon tay|dau ngon cai)/.test(text)) return "ngón tay cái";
   if (/(co tay|dau co tay)/.test(text)) return "cổ tay";
   if (/(khuyu tay|elbow|tennis elbow|dau tay|\btay\b)/.test(text)) return "tay";
@@ -589,7 +589,7 @@ function isUnclearJointComplaint(rawText) {
   const text = chatText(rawText);
   const mentionsJoint = /(dau khop|moi khop|nhuc khop|viem khop|thoai hoa khop|khop bi dau|khop dau)/.test(text);
   if (!mentionsJoint) return false;
-  const hasSpecificJoint = /(vai|gay|co|lung|that lung|goi|hang|co tay|ngon tay|ngon cai|khuyu tay|tay|chan|mong|mat ca|ban chan|khuu tay)/.test(text);
+  const hasSpecificJoint = /(vai|gay|co|lung|that lung|goi|khop hang|dau hang|\bhang\b|co tay|ngon tay|ngon cai|khuyu tay|tay|chan|mong|mat ca|ban chan|khuu tay)/.test(text);
   return !hasSpecificJoint;
 }
 
@@ -1586,7 +1586,7 @@ function painKey(value = "") {
   if (/ngon tay cai|ngon cai/.test(text)) return "ngon_tay_cai";
   if (/co tay/.test(text)) return "co_tay";
   if (/tay/.test(text)) return "tay";
-  if (/hang|khop hang/.test(text)) return "hang";
+  if (/(khop hang|dau hang|vung hang|\bhang\b)/.test(text)) return "hang";
   return text;
 }
 
@@ -1609,8 +1609,12 @@ function responseGuardSingle(state, rawMessage) {
     return handoff("blocked wrong diagnosis: knee without knee pain");
   }
 
-  if ((currentPainKey === "vai" || currentPainKey === "vai_gay") && /(te chan|xuong chan|xuong mong|than kinh toa|that lung)/.test(textValue)) {
+  if ((currentPainKey === "vai" || currentPainKey === "vai_gay") && /(te chan|xuong chan|xuong mong|than kinh toa|that lung|khop hang|vung hang|dau hang)/.test(textValue)) {
     return handoff("blocked wrong region: neck/shoulder cannot become leg/back");
+  }
+
+  if (currentPainKey !== "hang" && /(khop hang|vung hang|dau hang)/.test(textValue)) {
+    return handoff("blocked wrong diagnosis: hip without hip pain");
   }
 
   if ((currentPainKey === "ngon_tay_cai" || currentPainKey === "co_tay" || currentPainKey === "tay") && /(khop goi|than kinh toa|xuong mong|xuong chan)/.test(textValue)) {
@@ -2050,10 +2054,29 @@ async function handleMessagingEvent(event) {
     const deterministic = handleDeterministicFlow(chatKey, customerText);
     const state = getCustomerState(chatKey);
     const guarded = await smartReply(chatKey, customerText, deterministic);
+    const decisionTrace = {
+      detectedPainFromCustomer: detectPain(customerText) || "",
+      detectedDiseaseFromCustomer: detectDisease(customerText) || "",
+      detectedDurationFromCustomer: detectDuration(customerText) || "",
+      detectedTriggerFromCustomer: detectTrigger(customerText) || "",
+      detectedRadiationFromCustomer: detectRadiation(customerText) || "",
+      intent: state.customerIntent,
+      stage: state.stage,
+      painInMemory: state.pain,
+      diseaseInMemory: state.disease,
+      durationInMemory: state.duration,
+      triggerInMemory: state.trigger,
+      radiationInMemory: state.radiation,
+      deterministicAction: deterministic?.action || "",
+      deterministicMessage: deterministic?.message || "",
+      guardedAction: guarded?.action || "",
+      guardedMessage: guarded?.message || "",
+    };
+    recordChatEvent("decision", { pageId, chatKey, senderId, text: customerText, reason: "before final gate", decision: decisionTrace, state: stateSnapshot(state) });
 
     if (guarded.action !== "REPLY" || !guarded.message) {
       logLeadSignal(chatKey, state, customerText, "");
-      recordChatEvent("handoff", { pageId, chatKey, senderId, text: customerText, reason: guarded.message || "silent handoff", state: stateSnapshot(state) });
+      recordChatEvent("handoff", { pageId, chatKey, senderId, text: customerText, reason: guarded.message || "silent handoff", decision: decisionTrace, state: stateSnapshot(state) });
       await senderAction(senderId, "typing_off", pageId);
       return;
     }
@@ -2062,9 +2085,10 @@ async function handleMessagingEvent(event) {
     const finalGate = finalReplyGate(chatKey, pageId, senderId, customerText, messagesToSend, stateBeforeReplySnapshot);
     if (!finalGate.ok) {
       console.log("AI final gate blocked reply", { chatKey, reason: finalGate.reason, messagesToSend });
-      recordChatEvent("handoff", { pageId, chatKey, senderId, text: customerText, reason: finalGate.reason, attemptedReply: messagesToSend.join(" | "), state: stateSnapshot(state) });
+      recordChatEvent("handoff", { pageId, chatKey, senderId, text: customerText, reason: finalGate.reason, attemptedReply: messagesToSend.join(" | "), decision: decisionTrace, state: stateSnapshot(state) });
       return;
     }
+    console.log("AI final gate allowed reply", { chatKey, reason: "allowed by final gate", decision: decisionTrace, messagesToSend });
     for (const outgoingMessage of messagesToSend) {
       await delay(naturalDelay(outgoingMessage));
       if (isHumanTakenOver(chatKey)) {
@@ -2074,7 +2098,7 @@ async function handleMessagingEvent(event) {
       }
       rememberBotEcho(pageId, senderId, outgoingMessage);
       await sendMessage(senderId, outgoingMessage, pageId);
-      recordChatEvent("bot", { pageId, chatKey, senderId, text: outgoingMessage, state: stateSnapshot(state) });
+      recordChatEvent("bot", { pageId, chatKey, senderId, text: outgoingMessage, reason: "allowed by final gate", decision: decisionTrace, state: stateSnapshot(state) });
       state.lastBotMessage = outgoingMessage;
       const sentQuestionKey = messageQuestionKey(outgoingMessage);
       if (sentQuestionKey) state.sentQuestionKeys.add(sentQuestionKey);
