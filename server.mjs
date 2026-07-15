@@ -1514,6 +1514,43 @@ function isAddressAnswerMessage(message = "") {
   return /(33n|hoang quoc viet|94 duong 56|binh trung|chi nhanh 1|chi nhanh 2|co so 1|co so 2)/.test(text);
 }
 
+function diagnosisRegionKeys(message = "") {
+  const text = normalizeText(message);
+  const regions = new Set();
+
+  if (/(khop hang|dau hang|vung hang|\bhang\b)/.test(text)) regions.add("hang");
+  if (/(khop goi|dau goi|vung goi|thoai hoa khop goi)/.test(text)) regions.add("goi");
+  if (/(cot song that lung|that lung|thoat vi dia dem|than kinh toa|te chan|xuong mong|xuong chan)/.test(text)) regions.add("lung");
+  if (/(dot song co|cot song co|thoai hoa dot song co|chen ep re than kinh|vai gay|vung vai gay|cang co vung vai gay)/.test(text)) regions.add("vai_gay");
+  if (/(co tay|ngon tay|ngon cai|ong co tay|vung tay|dau tay|te tay)/.test(text)) regions.add("tay");
+
+  return regions;
+}
+
+function allowedDiagnosisRegionsForPain(state) {
+  const currentPainKey = painKey(state.pain);
+  if (currentPainKey === "lung") return new Set(["lung"]);
+  if (currentPainKey === "vai" || currentPainKey === "vai_gay") return new Set(["vai_gay", "tay"]);
+  if (currentPainKey === "goi") return new Set(["goi"]);
+  if (currentPainKey === "hang") return new Set(["hang"]);
+  if (currentPainKey === "ngon_tay_cai" || currentPainKey === "co_tay" || currentPainKey === "tay") return new Set(["tay"]);
+  return new Set();
+}
+
+function diagnosisRegionConflictReason(state, message = "") {
+  if (!state.pain) return "";
+  const mentionedRegions = diagnosisRegionKeys(message);
+  if (!mentionedRegions.size) return "";
+
+  const allowedRegions = allowedDiagnosisRegionsForPain(state);
+  if (!allowedRegions.size) return "";
+
+  const wrongRegions = [...mentionedRegions].filter((region) => !allowedRegions.has(region));
+  if (!wrongRegions.length) return "";
+
+  return `blocked diagnosis region mismatch: pain=${painKey(state.pain)} replyRegions=${[...mentionedRegions].join(",")}`;
+}
+
 function finalReplyGate(chatKey, pageId, senderId, customerText, messages, stateBeforeReply = {}) {
   const state = getCustomerState(chatKey);
   if (!state.sentMessageFingerprints) state.sentMessageFingerprints = new Set();
@@ -1553,6 +1590,11 @@ function finalReplyGate(chatKey, pageId, senderId, customerText, messages, state
   if (/gia goc|800|189|phi kham|chi kham thoi|khong ton phi/.test(customer) && hasPriceOffer) {
     lockConversation(pageId, senderId, "final gate: human price thread detected", customerText);
     return { ok: false, reason: "final gate: human price thread detected" };
+  }
+
+  const diagnosisConflict = diagnosisRegionConflictReason(state, combined);
+  if (diagnosisConflict) {
+    return { ok: false, reason: `final gate: ${diagnosisConflict}` };
   }
 
   for (const message of messages) {
@@ -1596,6 +1638,8 @@ function responseGuardSingle(state, rawMessage) {
   const lastText = normalizeText(state.lastBotMessage || "");
   const questionKey = messageQuestionKey(message);
   const currentPainKey = painKey(state.pain);
+  const diagnosisConflict = diagnosisRegionConflictReason(state, message);
+  if (diagnosisConflict) return handoff(diagnosisConflict);
 
   if (currentPainKey === "lung" && /(te tay|xuong tay|canh tay|co vai gay|vai gay)/.test(textValue)) {
     return handoff("blocked wrong region: back reply mentioned neck/hand");
@@ -2071,6 +2115,8 @@ async function handleMessagingEvent(event) {
       deterministicMessage: deterministic?.message || "",
       guardedAction: guarded?.action || "",
       guardedMessage: guarded?.message || "",
+      replyDiagnosisRegions: guarded?.message ? [...diagnosisRegionKeys(guarded.message)] : [],
+      allowedDiagnosisRegions: [...allowedDiagnosisRegionsForPain(state)],
     };
     recordChatEvent("decision", { pageId, chatKey, senderId, text: customerText, reason: "before final gate", decision: decisionTrace, state: stateSnapshot(state) });
 
