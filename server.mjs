@@ -2656,7 +2656,17 @@ function looksLikeKnownBotMessage(textValue = "", state = {}) {
   if (!textNorm) return false;
   if (state.lastBotMessage && normalizeText(state.lastBotMessage) === textNorm) return true;
   if (state.sentMessageFingerprints?.has?.(messageFingerprint(textValue))) return true;
-  if (/dau .* lau chua|moi dau gan day|ngoi lau|di lai|lan xuong|te tay|te chan|bac si kiem tra|dat lich online|499k|chi nhanh 1|chi nhanh 2|33n|94 duong 56/.test(textNorm)) return true;
+  if (/minh dang dau vung nao|cho iva xin sdt|bac si chao|da minh|dau .* lau chua|moi dau gan day|ngoi lau|dung dien thoai|di lai|lan xuong|te tay|te chan|bac si kiem tra|dat lich online|499k|chi nhanh 1|chi nhanh 2|33n|94 duong 56/.test(textNorm)) return true;
+  return false;
+}
+
+function looksLikeHumanManualMessage(textValue = "") {
+  const textNorm = normalizeText(textValue);
+  if (!textNorm) return false;
+  if (looksLikeKnownBotMessage(textValue)) return false;
+  if (/(nham|bam nham|pk nhan|phong kham nhan|quan ly lien he|em nhan duoc|anh chi cho em xin|cho pk xin|co so nao|chi nhanh nao|hoang quoc viet hay binh trung|da em dat hen|em xac nhan|lich hen|gui lich|giu lich|hotline|sdt|so dien thoai)/.test(textNorm)) return true;
+  if (/(chi|anh|co|chu)\s+(qua|den|sap xep|cho em xin|cho minh xin|minh tien|tien qua)/.test(textNorm)) return true;
+  if (/(hom nay|ngay mai|lat|may gio).*(qua|den|lich)|(?:qua|den).*(hom nay|ngay mai|lat|may gio)/.test(textNorm)) return true;
   return false;
 }
 
@@ -2675,6 +2685,14 @@ async function hasExternalPageReply(pageId, customerId, chatKey) {
     const textValue = item?.message || "";
     if (fromId !== String(pageId) || !textValue) continue;
     if (looksLikeKnownBotMessage(textValue, state)) continue;
+    if (!looksLikeHumanManualMessage(textValue)) {
+      console.log("External page message ignored as non-human/manual", {
+        chatKey,
+        pageId,
+        text: maskPrivateText(textValue).slice(0, 180),
+      });
+      continue;
+    }
     return { text: textValue, createdTime: item?.created_time || "" };
   }
   return false;
