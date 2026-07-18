@@ -2869,10 +2869,27 @@ async function handleMessagingEvent(event) {
 
 async function handleWebhookPost(req, res) {
   const body = await readJson(req);
-  if (body.object !== "page") return json(res, 404, { error: "Unsupported object" });
+  console.log("WEBHOOK POST RECEIVED", {
+    object: body.object || "",
+    entries: Array.isArray(body.entry) ? body.entry.length : 0,
+    pageIds: (body.entry || []).map((entry) => entry.id || "").filter(Boolean),
+    eventCount: (body.entry || []).reduce((sum, entry) => sum + (Array.isArray(entry.messaging) ? entry.messaging.length : 0), 0),
+  });
+  if (body.object !== "page") {
+    console.log("WEBHOOK POST IGNORED unsupported object", { object: body.object || "", keys: Object.keys(body || {}) });
+    return json(res, 404, { error: "Unsupported object" });
+  }
 
   for (const entry of body.entry || []) {
     for (const event of entry.messaging || []) {
+      console.log("WEBHOOK EVENT", {
+        pageId: event.recipient?.id || entry.id || "",
+        senderId: event.sender?.id || "",
+        hasMessage: Boolean(event.message),
+        isEcho: Boolean(event.message?.is_echo),
+        hasText: Boolean(event.message?.text),
+        hasPostback: Boolean(event.postback),
+      });
       handleMessagingEvent(event);
     }
   }
@@ -2931,6 +2948,21 @@ const server = http.createServer(async (req, res) => {
         days: 7,
         conversations: qualityByConversation(rows),
         rows,
+      });
+    }
+
+    if (req.method === "GET" && url.pathname === "/debug-config") {
+      const token = url.searchParams.get("token") || "";
+      if (REPORT_TOKEN && token !== REPORT_TOKEN) return text(res, 403, "Forbidden");
+      return json(res, 200, {
+        ok: true,
+        pageTokenIds: Object.keys(PAGE_TOKENS),
+        pageTokenCount: Object.keys(PAGE_TOKENS).length,
+        hasFallbackPageAccessToken: Boolean(PAGE_ACCESS_TOKEN),
+        graphApiVersion: GRAPH_API_VERSION,
+        model: OPENAI_MODEL,
+        agenticReviewEnabled: AGENTIC_REVIEW_ENABLED,
+        webhook: "/webhook",
       });
     }
 
