@@ -11,6 +11,7 @@ const PAGE_TOKENS_RAW = process.env.PAGE_TOKENS || "";
 const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || "v25.0";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const AGENTIC_REVIEW_ENABLED = process.env.AGENTIC_REVIEW_ENABLED !== "false";
 const MIN_REPLY_DELAY_MS = Number(process.env.MIN_REPLY_DELAY_MS || 2500);
 const MAX_REPLY_DELAY_MS = Number(process.env.MAX_REPLY_DELAY_MS || 6500);
 const CHAT_LOG_DIR = process.env.CHAT_LOG_DIR || path.join(process.cwd(), "iva-chat-logs");
@@ -2432,6 +2433,119 @@ async function openaiReply(senderId, customerText) {
   return parsed;
 }
 
+async function agenticReviewReply(chatKey, customerText, candidateReply, source = "unknown") {
+  if (!AGENTIC_REVIEW_ENABLED) return candidateReply;
+  if (!OPENAI_API_KEY) return candidateReply;
+  if (!candidateReply || candidateReply.action !== "REPLY") return candidateReply;
+
+  const state = getCustomerState(chatKey);
+  const candidateMessages = Array.isArray(candidateReply.messages) ? candidateReply.messages : [candidateReply.message].filter(Boolean);
+  const candidateText = candidateMessages.join("\n").trim();
+  if (!candidateText) return handoff("agentic reviewer: empty candidate");
+
+  const reviewerPayload = {
+    task: "review_before_send",
+    source,
+    customerText,
+    candidateText,
+    recentConversation: recentConversation(chatKey, 16),
+    lastOutboundRole: lastOutboundRole(chatKey),
+    state: stateSnapshot(state),
+    knownInfo: {
+      pain: state.primaryPain || state.pain || "",
+      disease: state.disease || "",
+      duration: state.duration || "",
+      trigger: state.trigger || "",
+      radiation: state.radiation || "",
+      preferredBranch: state.preferredBranch || "",
+      priceSent: Boolean(state.priceSent),
+      addressSent: Boolean(state.addressSent),
+      assessmentSent: Boolean(state.assessmentSent),
+      bookingAsked: Boolean(state.bookingAsked),
+      hasPhone: Boolean(state.phoneNumber || state.hasPhone),
+    },
+    rules: [
+      "Neu lich su gan nhat co tin nhan Page/nguoi that khong phai bot thi tra HANDOFF, khong sua va khong gui.",
+      "Neu khach da gui so dien thoai thi HANDOFF.",
+      "Khong hoi lai thong tin khach da tra loi.",
+      "Khong gui cau lap y/cau lap lai.",
+      "Doc y khach vua nhan truoc: neu khach hoi gia/dia chi/lich thi phai xu ly dung y do, khong quay ve hoi trieu chung.",
+      "Neu khach hoi 2 y trong 1 tin thi phai xu ly du cac y quan trong.",
+      "Khong chan doan sai vung: lung khong thanh goi/hang/tay; co-vai-gay khong thanh goi/hang/lung; tay/ngon tay khong hoi di lai/hang/goi.",
+      "Tu 'thang' la thoi gian, khong duoc hieu thanh 'hang'.",
+      "Khach noi dau khop ma chua ro khop nao thi chi hoi: Da minh dau khop nao a?",
+      "Neu khach hoi gia sau khi da du dau hieu thi phai tra loi uu dai, khong hoi them.",
+      "Neu khong chac hoac cau nhap khong dat thi HANDOFF.",
+      "Van phong gan gui, ngan, 1 diem cham, khong dung ban/quy khach/tinh trang cu the/dau vi tri nao.",
+    ],
+    outputFormat: {
+      action: "REPLY or HANDOFF",
+      message: "final message if REPLY, otherwise empty",
+      reason: "short reason",
+      score: "0-10",
+    },
+  };
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      instructions:
+        "Ban la lop KIEM DUYET CUOI cua AI chatpage phong kham IVA. Viec quan trong nhat la CHAN tin sai, lap, hoi lai, chen vao khi nguoi that da nhan. Chi cho gui neu chac dung ngu canh. Tra ve JSON hop le, khong giai thich ngoai JSON.",
+      input: [
+        {
+          role: "user",
+          content: JSON.stringify(reviewerPayload),
+        },
+      ],
+      temperature: 0,
+      max_output_tokens: 220,
+    }),
+  });
+
+  if (!response.ok) {
+    console.error("Agentic reviewer OpenAI error", response.status, await response.text());
+    return handoff("agentic reviewer error");
+  }
+
+  const data = await response.json();
+  const outputText =
+    data.output_text ||
+    data.output?.flatMap((item) => item.content || [])?.map((c) => c.text || "").join("") ||
+    "";
+
+  let reviewed;
+  try {
+    reviewed = JSON.parse(outputText);
+  } catch {
+    console.error("Agentic reviewer returned non-JSON:", outputText);
+    return handoff("agentic reviewer non-json");
+  }
+
+  const score = Number(reviewed.score || 0);
+  const action = String(reviewed.action || "").toUpperCase();
+  const message = String(reviewed.message || "").trim();
+  console.log("Agentic reviewer:", {
+    chatKey,
+    source,
+    action,
+    score,
+    reason: reviewed.reason || "",
+    candidateText,
+    finalMessage: message,
+  });
+
+  if (action !== "REPLY" || !message || score < 8) {
+    return handoff(`agentic reviewer blocked: ${reviewed.reason || "low score"}`);
+  }
+
+  return responseGuard(state, { action: "REPLY", message });
+}
+
 async function smartReply(chatKey, customerText, deterministicReply = null) {
   const state = getCustomerState(chatKey);
   if (deterministicReply) {
@@ -2455,7 +2569,7 @@ async function smartReply(chatKey, customerText, deterministicReply = null) {
         nextBestAction: state.nextBestAction,
         reply: guarded.message,
       });
-      return guarded;
+      return agenticReviewReply(chatKey, customerText, guarded, "controlled_rule");
     }
     console.log("Decision source: controlled_guard_stop", {
       chatKey,
@@ -2478,7 +2592,7 @@ async function smartReply(chatKey, customerText, deterministicReply = null) {
     action: guardedAi.action,
     reply: guardedAi.message || "",
   });
-  return guardedAi;
+  return agenticReviewReply(chatKey, customerText, guardedAi, "ai_brain");
 }
 
 async function graphApi(path, body, pageId = "") {
