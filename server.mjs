@@ -1666,6 +1666,9 @@ function addressReply(state) {
   if (state.preferredBranch) {
     return result(state, branchAddress(state.preferredBranch));
   }
+  if (state.sentQuestionKeys?.has?.("ask_branch") || state.sentQuestionKeys?.has?.("branch_distance")) {
+    return result(state, CLINIC.address);
+  }
   if (state.assessmentSent || state.wantsBooking || state.priceSent) {
     return multiResult(state, [CLINIC.address, CLINIC.addressAsk], "ask_branch");
   }
@@ -2035,10 +2038,12 @@ function finalReplyGate(chatKey, pageId, senderId, customerText, messages, state
   for (const message of messages) {
     const fp = messageFingerprint(message);
     if (fp && state.sentMessageFingerprints.has(fp)) {
+      if (askedAddressNow && isAddressAnswerMessage(message)) continue;
       return { ok: false, reason: "final gate: repeated exact/near message" };
     }
     const questionKey = messageQuestionKey(message);
     if (questionKey && state.sentQuestionKeys.has(questionKey)) {
+      if (askedAddressNow && questionKey === "ask_branch" && messages.some(isAddressAnswerMessage)) continue;
       return { ok: false, reason: `final gate: repeated question ${questionKey}` };
     }
   }
@@ -2467,6 +2472,14 @@ async function agenticReviewReply(chatKey, customerText, candidateReply, source 
     });
     return responseGuard(state, candidateReply);
   }
+  if (isAddressQuestion(customerText) && isAddressAnswerMessage(candidateText)) {
+    console.log("Agentic reviewer bypass: safe address answer", {
+      chatKey,
+      customerText: normalizedCustomerText,
+      candidateText: normalizedCandidateText,
+    });
+    return responseGuard(state, candidateReply);
+  }
 
   const reviewerPayload = {
     task: "review_before_send",
@@ -2497,6 +2510,7 @@ async function agenticReviewReply(chatKey, customerText, candidateReply, source 
       "Doc y khach vua nhan truoc: neu khach hoi gia/dia chi/lich thi phai xu ly dung y do, khong quay ve hoi trieu chung.",
       "Neu khach hoi 2 y trong 1 tin thi phai xu ly du cac y quan trong.",
       "Neu khach chi mo dau bang tu van/tv/xin tu van/chao/alo va bot chi hoi dau-moi phan nao thi cho REPLY, khong HANDOFF.",
+      "Neu khach hoi dia chi/o dau va cau tra loi co 33N Hoang Quoc Viet hoac 94 Duong 56/Binh Trung thi cho REPLY, khong HANDOFF.",
       "Khong chan doan sai vung: lung khong thanh goi/hang/tay; co-vai-gay khong thanh goi/hang/lung; tay/ngon tay khong hoi di lai/hang/goi.",
       "Tu 'thang' la thoi gian, khong duoc hieu thanh 'hang'.",
       "Khach noi dau khop ma chua ro khop nao thi chi hoi: Da minh dau khop nao a?",
