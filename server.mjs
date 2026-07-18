@@ -979,6 +979,36 @@ function detectObjection(rawText) {
   return "";
 }
 
+function detectCustomerEmotion(rawText) {
+  const text = chatText(rawText);
+  if (/(dat qua|so dat|so ton tien|toi so dat|mac qua|chi phi cao)/.test(text)) return "lo_gia";
+  if (/(ep mua|phat sinh|co ep|so bi ep|co phat sinh)/.test(text)) return "so_bi_ban_hang";
+  if (/(dang ban|khong co thoi gian|chua sap xep|lat nua|de sau)/.test(text)) return "dang_ban";
+  if (/(sao hoi lai|hoi roi|toi noi roi|nham|khong phai|bot|may tra loi)/.test(text)) return "kho_chiu";
+  if (/(hom nay|mai|lat qua|qua duoc|dat lich|may gio|dia chi|o dau|chi phi|gia)/.test(text)) return "co_tin_hieu_chot";
+  return "binh_thuong";
+}
+
+function estimateLeadHeat(state, customerText = "") {
+  const text = chatText(customerText);
+  let score = 0;
+  if (state.pain || state.disease || detectPain(customerText) || detectDisease(customerText)) score += 2;
+  if (state.duration || detectDuration(customerText)) score += 1;
+  if (state.trigger || detectTrigger(customerText)) score += 1;
+  if (state.radiation || detectRadiation(customerText)) score += 1;
+  if (state.assessmentSent) score += 1;
+  if (state.askedPrice || isPriceQuestion(customerText)) score += 2;
+  if (state.askedAddress || isAddressQuestion(customerText)) score += 2;
+  if (state.wantsBooking || isBookingIntent(customerText)) score += 3;
+  if (state.hasPhone || hasPhoneNumber(customerText)) score += 4;
+  if (/(hom nay|mai|lat qua|chieu nay|sang mai|toi qua)/.test(text)) score += 2;
+
+  if (score >= 8) return "rat_nong";
+  if (score >= 5) return "nong";
+  if (score >= 2) return "am";
+  return "lanh";
+}
+
 function resetClinicalIfNewTopic(state, pain, disease) {
   const changedPain = pain && state.pain && pain !== state.pain;
   const changedDisease = disease && state.disease && disease !== state.disease;
@@ -1007,7 +1037,9 @@ function classifyLead(state) {
     Boolean(state.treated && state.treated !== "chưa") ||
     /(thang|nam)/.test(normalizeText(state.duration));
 
-  if (state.hasPhone || state.wantsBooking) state.temperature = "hot";
+  const heat = estimateLeadHeat(state);
+  if (heat === "rat_nong" || heat === "nong") state.temperature = "hot";
+  else if (heat === "am") state.temperature = "warm";
   else if (state.askedPrice || state.askedAddress || strongerSignal) state.temperature = "warm";
   else state.temperature = hasSignal ? "warm" : "cold";
 
@@ -1225,6 +1257,8 @@ function agenticDecisionSummary(state, customerText = "") {
     chosenAction,
     knownPain: state.primaryPain || state.pain || "",
     enoughForPrice: hasEnoughForPrice(state),
+    customerEmotion: detectCustomerEmotion(customerText),
+    leadHeat: estimateLeadHeat(state, customerText),
     shouldStop: Boolean(state.humanTakeover || hasPhoneNumber(customerText) || isCustomerEndingOrDeclining(customerText) || isScheduleChangeOrDelay(customerText)),
   };
 }
@@ -1882,6 +1916,56 @@ function selfCheckReplyAgainstCustomerIntent(state, customerText = "", combinedR
   return "";
 }
 
+function scoreReplyQuality(state, customerText = "", combinedReply = "", stateBeforeReply = {}) {
+  const issues = [];
+  let score = 10;
+  const reply = normalizeText(combinedReply);
+  const customer = chatText(customerText);
+
+  if (!combinedReply || !reply) {
+    return { score: 0, issues: ["empty_reply"] };
+  }
+  if (combinedReply.length > 190) {
+    score -= 2;
+    issues.push("too_long");
+  }
+  if (/\bban\b|quy khach|tinh trang cu the|vi tri nao|dau o dau/.test(reply)) {
+    score -= 3;
+    issues.push("robotic_wording");
+  }
+  if (state.lastBotMessage && normalizeText(state.lastBotMessage) === reply) {
+    score -= 5;
+    issues.push("duplicate_last_bot");
+  }
+  const questionKey = messageQuestionKey(combinedReply);
+  if (questionKey && state.sentQuestionKeys?.has?.(questionKey)) {
+    score -= 5;
+    issues.push(`repeat_question_${questionKey}`);
+  }
+  if (diagnosisRegionConflictReason(state, combinedReply)) {
+    score -= 6;
+    issues.push("wrong_region");
+  }
+  if ((isPriceQuestion(customerText) || /gia|chi phi|bao nhieu|bn|dat/.test(customer)) && (hasEnoughForPrice(state) || stateBeforeReply.assessmentSent) && !/(499|uu dai|chi phi|lo trinh|sau khi kham)/.test(reply)) {
+    score -= 5;
+    issues.push("missed_price_answer");
+  }
+  if (isAddressQuestion(customerText) && !isAddressAnswerMessage(combinedReply)) {
+    score -= 5;
+    issues.push("missed_address_answer");
+  }
+  if (isBookingIntent(customerText) && !/(chi nhanh|ten|sdt|so dien thoai|giu lich|may gio|qua duoc|lich)/.test(reply)) {
+    score -= 4;
+    issues.push("missed_booking_signal");
+  }
+  if (detectCustomerEmotion(customerText) === "kho_chiu" && isClinicalQuestionMessage(combinedReply)) {
+    score -= 4;
+    issues.push("asked_more_when_customer_unhappy");
+  }
+
+  return { score: Math.max(0, Math.min(10, score)), issues };
+}
+
 function finalReplyGate(chatKey, pageId, senderId, customerText, messages, stateBeforeReply = {}) {
   const state = getCustomerState(chatKey);
   if (!state.sentMessageFingerprints) state.sentMessageFingerprints = new Set();
@@ -1896,6 +1980,10 @@ function finalReplyGate(chatKey, pageId, senderId, customerText, messages, state
   const intentMismatch = selfCheckReplyAgainstCustomerIntent(state, customerText, combined, stateBeforeReply);
   if (intentMismatch) {
     return { ok: false, reason: `final gate: ${intentMismatch}` };
+  }
+  const quality = scoreReplyQuality(state, customerText, combined, stateBeforeReply);
+  if (quality.score < 7) {
+    return { ok: false, reason: `final gate: low reply quality ${quality.score}/10 ${quality.issues.join(",")}` };
   }
 
   if (isHumanTakenOver(chatKey) || state.humanTakeover) {
@@ -2127,6 +2215,8 @@ function logLeadSignal(senderId, state, customerText, botMessage = "") {
     customerIntent: state.customerIntent,
     group: state.leadGroup,
     temperature: state.temperature,
+    emotion: detectCustomerEmotion(customerText),
+    leadHeat: estimateLeadHeat(state, customerText),
     nextGoal: state.nextGoal,
     nextBestAction: state.nextBestAction,
     stage: state.stage,
