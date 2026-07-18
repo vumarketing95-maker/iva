@@ -792,8 +792,9 @@ function detectDisease(rawText) {
 function detectDuration(rawText) {
   const text = chatText(rawText);
   if (/^\d+\s*(ngay|tuan|thang|nam)/.test(text)) return rawText.trim();
-  if (/(hom qua|moi day|gan day|vua bi|moi bi|moi gan day|may hom|vai hom|tuan|thang|nam|ngay)/.test(text)) return rawText.trim();
+  if (/(hom qua|moi day|gan day|vua bi|moi bi|moi gan day|may hom|vai hom|tuan|thang|nam|ngay|lau roi|lau r|lau lau|keo dai|bi lau)/.test(text)) return rawText.trim();
   if (/^(moi|moi em|moi a|moi anh|moi chi|gan day|gan day em)$/.test(text)) return rawText.trim();
+  if (/^(lau|lau roi|lau roi em|lau roi a|lau roi anh|lau roi chi|lau lam|lau lam roi)$/.test(text)) return rawText.trim();
   return "";
 }
 
@@ -974,6 +975,11 @@ function isNumbnessComplaint(rawText) {
 function isPing(rawText) {
   const text = chatText(rawText);
   return /^(alo|hello|helo|hi|chao|tu van|can tu van|em oi|e oi|co ai khong)$/.test(text);
+}
+
+function isStatusPing(rawText) {
+  const text = chatText(rawText);
+  return /^(dau roi|em dau roi|e dau roi|alo dau roi|sao chua tra loi|sao khong tra loi|alo em oi|alo e oi|rep di|tra loi di|co ai khong)$/.test(text);
 }
 
 function isOpenConsultation(rawText) {
@@ -1787,6 +1793,18 @@ function handleDeterministicFlow(senderId, customerText) {
   if (isCustomerCorrection(customerText)) return customerCorrectionReply(state, customerText);
   if (isOutcomeQuestion(customerText)) return outcomeQuestionReply(state, customerText);
   if (isUnclearJointComplaint(customerText) && !state.pain) return askWhichJoint(state);
+  if (
+    isStatusPing(customerText) &&
+    !currentPain &&
+    !currentDisease &&
+    !isPriceQuestion(customerText) &&
+    !isAddressQuestion(customerText) &&
+    !isBookingIntent(customerText)
+  ) {
+    if (state.disease) return knownDiseaseFlow(state, customerText);
+    if (state.pain) return symptomFlow(state);
+    return askProblem(state);
+  }
   if (
     isBranchChoice(customerText) &&
     !currentPain &&
@@ -2819,7 +2837,16 @@ async function handleMessagingEvent(event) {
       console.log("Ignored bot echo", { pageId: echoPageId, customerId: echoCustomerId, appId: message.app_id || "" });
       return;
     }
-    markHumanTakeover(echoPageId, echoCustomerId, `page echo not sent by bot${message.app_id ? " with app_id" : ""}`, echoText);
+    if (looksLikeHumanManualMessage(echoText)) {
+      markHumanTakeover(echoPageId, echoCustomerId, `manual page echo detected${message.app_id ? " with app_id" : ""}`, echoText);
+      return;
+    }
+    console.log("Ambiguous page echo ignored, bot will continue on next customer message", {
+      pageId: echoPageId,
+      customerId: echoCustomerId,
+      appId: message.app_id || "",
+      text: maskPrivateText(echoText).slice(0, 180),
+    });
     return;
   }
   if (isDuplicate(message.mid)) return;
