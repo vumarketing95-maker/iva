@@ -695,6 +695,7 @@ function detectPersona(rawText, state) {
 
 function detectPain(rawText) {
   const text = chatText(rawText);
+  if (isMixedHandLegNumbness(rawText)) return "";
   if (isUnclearJointComplaint(rawText)) return "";
   if (/(hoi chung ong co tay|ong co tay|te dau ngon tay|te ngon tay|te dau ngon|te ngon cai|te dau ngon cai)/.test(text)) return "cổ tay";
   if (/(co vai gay|vai gay|dau vai gay|co gay|dau vung co|vung co|dau co|mo co|te tay)/.test(text)) return "vai gáy";
@@ -710,6 +711,7 @@ function detectPain(rawText) {
 
 function detectExplicitPain(rawText) {
   const text = chatText(rawText);
+  if (isMixedHandLegNumbness(rawText)) return "";
   if (isUnclearJointComplaint(rawText)) return "";
 
   if (/(hoi chung ong co tay|ong co tay|te dau ngon tay|te ngon tay|te dau ngon|te ngon cai|te dau ngon cai)/.test(text)) return "cá»• tay";
@@ -722,6 +724,11 @@ function detectExplicitPain(rawText) {
   if (/(co tay|dau co tay|te co tay)/.test(text)) return "cá»• tay";
   if (/(khuyu tay|khuu tay|elbow|tennis elbow|dau tay)/.test(text)) return "tay";
   return "";
+}
+
+function isMixedHandLegNumbness(rawText) {
+  const text = chatText(rawText);
+  return /(te tay chan|te chan tay|tay chan.*te|te ca tay.*chan|te ca chan.*tay|te deu tay chan|te het tay chan)/.test(text);
 }
 
 function shouldAllowPainUpdate(state, pain, explicitPain = "") {
@@ -1190,6 +1197,35 @@ function agenticProfile(state, customerText = "") {
     missing,
     canAssess: missing.filter((item) => item !== "radiation").length === 0 && (missing.indexOf("radiation") === -1 || state.askedFields.has("radiation")),
     canPrice: hasEnoughForPrice(state),
+  };
+}
+
+function agenticDecisionSummary(state, customerText = "") {
+  const directNeeds = [];
+  if (isPriceQuestion(customerText)) directNeeds.push("price");
+  if (isAddressQuestion(customerText)) directNeeds.push("address");
+  if (isBookingIntent(customerText)) directNeeds.push("booking");
+  if (hasPhoneNumber(customerText)) directNeeds.push("phone_handoff");
+  if (isMixedHandLegNumbness(customerText)) directNeeds.push("separate_hand_leg_numbness");
+  if (isSpecificDiseaseQuestion(customerText)) directNeeds.push("specific_disease");
+
+  let chosenAction = "clinical_next_step";
+  if (state.humanTakeover) chosenAction = "handoff_human_takeover";
+  else if (directNeeds.includes("phone_handoff")) chosenAction = "handoff_phone";
+  else if (directNeeds.includes("address") && directNeeds.includes("price")) chosenAction = "answer_address_and_price_if_ready";
+  else if (directNeeds.includes("price") && hasEnoughForPrice(state)) chosenAction = "answer_price_offer";
+  else if (directNeeds.includes("price")) chosenAction = "ask_one_missing_before_price";
+  else if (directNeeds.includes("address")) chosenAction = "answer_address";
+  else if (directNeeds.includes("booking")) chosenAction = "move_to_booking";
+  else if (directNeeds.includes("separate_hand_leg_numbness")) chosenAction = "ask_which_numbness_stronger";
+  else if (directNeeds.includes("specific_disease")) chosenAction = "answer_specific_disease";
+
+  return {
+    directNeeds,
+    chosenAction,
+    knownPain: state.primaryPain || state.pain || "",
+    enoughForPrice: hasEnoughForPrice(state),
+    shouldStop: Boolean(state.humanTakeover || hasPhoneNumber(customerText) || isCustomerEndingOrDeclining(customerText) || isScheduleChangeOrDelay(customerText)),
   };
 }
 
@@ -1663,6 +1699,10 @@ function handleDeterministicFlow(senderId, customerText) {
   }
   if (isOutOfScopeQuestion(customerText)) return handoff("out of scope needs human");
   if (isScheduleChangeOrDelay(customerText)) return handoff("schedule change/delay needs human");
+  if (isMixedHandLegNumbness(customerText) && !state.primaryPain) {
+    state.stage = "separate_hand_leg_numbness";
+    return result(state, "Dạ mình thấy tê tay nhiều hơn hay tê chân nhiều hơn ạ?", "ask_mixed_numbness");
+  }
   if (hasPhoneNumber(customerText)) {
     lockChatKey(senderId, "phone received inside deterministic flow - human follow up only", customerText);
     return handoff("phone received - human follow up only");
@@ -1781,6 +1821,67 @@ function diagnosisRegionConflictReason(state, message = "") {
   return `blocked diagnosis region mismatch: pain=${painKey(lockedPain)} replyRegions=${[...mentionedRegions].join(",")}`;
 }
 
+function isClinicalQuestionMessage(message = "") {
+  const text = normalizeText(message);
+  return /(dau .* lau chua|lau chua|bao lau|ngoi lau|dung dien thoai|di lai|van dong|tu nhien|lan xuong|te tay|te chan|cam nam|gap duoi|xoay co tay|dau khop nao|dau phan nao|dau moi phan nao)/.test(text);
+}
+
+function customerAskedTwoOrMoreClosingIntents(customerText = "") {
+  let count = 0;
+  if (isPriceQuestion(customerText)) count += 1;
+  if (isAddressQuestion(customerText)) count += 1;
+  if (isBookingIntent(customerText)) count += 1;
+  if (hasPhoneNumber(customerText)) count += 1;
+  return count >= 2;
+}
+
+function selfCheckReplyAgainstCustomerIntent(state, customerText = "", combinedReply = "", stateBeforeReply = {}) {
+  const reply = normalizeText(combinedReply);
+  const customer = chatText(customerText);
+  const askedPriceNow = isPriceQuestion(customerText);
+  const askedAddressNow = isAddressQuestion(customerText);
+  const askedBookingNow = isBookingIntent(customerText);
+  const enoughForPriceNow = hasEnoughForPrice(state) || stateBeforeReply.assessmentSent;
+
+  if (/te tay chan|te chan tay|tay chan deu te|te ca tay va chan/.test(customer)) {
+    if (!/(tay nhieu hon|chan nhieu hon|te tay nhieu hon|te chan nhieu hon)/.test(reply)) {
+      return "agentic self-check: numbness in both hand/leg must ask which side is stronger";
+    }
+  }
+
+  if (askedPriceNow && enoughForPriceNow && !/(499|uu dai|chi phi|lo trinh|sau khi kham)/.test(reply)) {
+    return "agentic self-check: customer asked price after enough info but reply did not answer price";
+  }
+
+  if (askedPriceNow && enoughForPriceNow && isClinicalQuestionMessage(combinedReply)) {
+    return "agentic self-check: asked clinical question after price-ready customer";
+  }
+
+  if (askedAddressNow && !isAddressAnswerMessage(combinedReply)) {
+    return "agentic self-check: customer asked address but reply did not answer address";
+  }
+
+  if (askedBookingNow && !/(chi nhanh 1|chi nhanh 2|hoang quoc viet|binh trung|ten|sdt|so dien thoai|giu lich|qua duoc|may gio|lich)/.test(reply)) {
+    return "agentic self-check: customer asked booking but reply did not move to booking";
+  }
+
+  if (customerAskedTwoOrMoreClosingIntents(customerText)) {
+    if (askedPriceNow && enoughForPriceNow && !/(499|uu dai|chi phi|lo trinh|sau khi kham)/.test(reply)) return "agentic self-check: missed price in multi-intent customer message";
+    if (askedAddressNow && !isAddressAnswerMessage(combinedReply)) return "agentic self-check: missed address in multi-intent customer message";
+    if (askedBookingNow && !/(chi nhanh|ten|sdt|giu lich|may gio|qua duoc)/.test(reply)) return "agentic self-check: missed booking in multi-intent customer message";
+  }
+
+  if ((state.priceSent || stateBeforeReply.priceSent) && /(499|uu dai|chi phi|lo trinh)/.test(reply) && !askedPriceNow) {
+    return "agentic self-check: repeated price without customer asking price";
+  }
+
+  if ((state.assessmentSent || stateBeforeReply.assessmentSent) && /dau hieu nay co the nghieng ve/.test(reply) && !isSpecificDiseaseQuestion(customerText) && !askedPriceNow) {
+    return "agentic self-check: repeated assessment while customer moved to another intent";
+  }
+
+  return "";
+}
+
 function finalReplyGate(chatKey, pageId, senderId, customerText, messages, stateBeforeReply = {}) {
   const state = getCustomerState(chatKey);
   if (!state.sentMessageFingerprints) state.sentMessageFingerprints = new Set();
@@ -1791,6 +1892,11 @@ function finalReplyGate(chatKey, pageId, senderId, customerText, messages, state
   const askedAddressNow = isAddressQuestion(customerText);
   const askedPriceNow = isPriceQuestion(customerText);
   const hasPriceOffer = messages.some(isPriceOfferMessage);
+
+  const intentMismatch = selfCheckReplyAgainstCustomerIntent(state, customerText, combined, stateBeforeReply);
+  if (intentMismatch) {
+    return { ok: false, reason: `final gate: ${intentMismatch}` };
+  }
 
   if (isHumanTakenOver(chatKey) || state.humanTakeover) {
     return { ok: false, reason: "final gate: human takeover" };
@@ -1980,6 +2086,7 @@ function messageQuestionKey(message) {
   if (/van dong hay tu nhien|sau van dong hay tu nhien|di lai ngoi lau hay tu nhien|di lai hay ngoi lau/.test(textValue)) return "ask_trigger";
   if (/ngoi lau|dung dien thoai|di lai co thay dau hon|nhanh moi hon/.test(textValue)) return "ask_trigger";
   if (/cam nam|gap duoi|xoay co tay|xoay tay/.test(textValue)) return "ask_hand_function";
+  if (/te tay nhieu hon|te chan nhieu hon/.test(textValue)) return "ask_mixed_numbness";
   if (/lan xuong tay|te tay/.test(textValue)) return "ask_arm_radiation";
   if (/lan xuong mong|lan xuong chan|te chan/.test(textValue)) return "ask_leg_radiation";
   if (/dieu tri phuong phap nao|da dieu tri|da di dieu tri/.test(textValue)) return "ask_treatment";
@@ -2112,10 +2219,13 @@ function agenticOperatingCore(state = {}) {
   };
 }
 
-function buildBrainContext(state, customerText) {
+function buildBrainContext(state, customerText, chatKey = "") {
   return {
     customerText,
+    recentConversation: recentConversation(chatKey, 12),
+    lastOutboundRole: lastOutboundRole(chatKey),
     agenticOperatingCore: agenticOperatingCore(state),
+    agenticDecision: agenticDecisionSummary(state, customerText),
     mustThinkBeforeReply: [
       "1. Khách vừa hỏi/nhắn điều gì thật sự?",
       "2. Ý khách đang cần xử lý ngay là giá, địa chỉ, lịch, triệu chứng, SĐT, hay đổi/hoãn lịch?",
@@ -2173,7 +2283,7 @@ async function openaiReply(senderId, customerText) {
 
   const history = getHistory(senderId);
   const state = getCustomerState(senderId);
-  const brainContext = buildBrainContext(state, customerText);
+  const brainContext = buildBrainContext(state, customerText, senderId);
   console.log("AI brain context:", brainContext);
   history.push({
     role: "user",
@@ -2476,6 +2586,7 @@ async function handleMessagingEvent(event) {
     const deterministic = handleDeterministicFlow(chatKey, customerText);
     const state = getCustomerState(chatKey);
     const profile = agenticProfile(state, customerText);
+    const agenticDecision = agenticDecisionSummary(state, customerText);
     const guarded = await smartReply(chatKey, customerText, deterministic);
     const decisionTrace = {
       detectedPainFromCustomer: detectPain(customerText) || "",
@@ -2492,6 +2603,7 @@ async function handleMessagingEvent(event) {
       triggerInMemory: state.trigger,
       radiationInMemory: state.radiation,
       agenticProfile: profile,
+      agenticDecision,
       deterministicAction: deterministic?.action || "",
       deterministicMessage: deterministic?.message || "",
       guardedAction: guarded?.action || "",
