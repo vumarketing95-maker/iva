@@ -131,6 +131,45 @@ function unlockConversation(pageId, customerId, reason = "manual start bot") {
   console.log("Bot re-enabled", { chatKey, reason });
 }
 
+function unlockChatKey(chatKey, reason = "manual unlock") {
+  if (!chatKey) return false;
+  const existed = humanTakenOverConversations.delete(chatKey);
+  saveHumanTakeovers();
+  const state = getCustomerState(chatKey);
+  state.humanTakeover = false;
+  state.stage = "bot_reenabled";
+  recordChatEvent("bot_reenabled", { chatKey, text: "", reason, state: stateSnapshot(state) });
+  console.log("Bot re-enabled", { chatKey, reason });
+  return existed;
+}
+
+function unlockPageLocks(pageId, reason = "manual unlock page") {
+  const prefix = `${String(pageId || "").trim()}:`;
+  if (!prefix || prefix === ":") return 0;
+  const keys = [...humanTakenOverConversations].filter((key) => key.startsWith(prefix));
+  for (const key of keys) unlockChatKey(key, reason);
+  return keys.length;
+}
+
+function listHumanLocks(pageId = "") {
+  const prefix = pageId ? `${String(pageId).trim()}:` : "";
+  return [...humanTakenOverConversations]
+    .filter((key) => !prefix || key.startsWith(prefix))
+    .map((key) => {
+      const state = customerStates.get(key) || {};
+      const [lockedPageId, customerId] = key.split(":");
+      return {
+        chatKey: key,
+        pageId: lockedPageId || "",
+        customerId: customerId || "",
+        stage: state.stage || "",
+        pain: state.pain || "",
+        lastCustomerMessage: state.lastCustomerMessage || "",
+        lastBotMessage: state.lastBotMessage || "",
+      };
+    });
+}
+
 function isKnownPageId(id = "") {
   const value = String(id || "").trim();
   if (!value) return false;
@@ -1510,8 +1549,8 @@ function diseaseLabel(state) {
   if (clinicalPainKey === "vai" || clinicalPainKey === "vai_gay") return longTime ? "căng cơ vùng vai gáy hoặc vấn đề đốt sống cổ" : "căng cơ vùng vai gáy";
   if (clinicalPainKey === "goi") return "vấn đề khớp gối";
   if (clinicalPainKey === "hang") return "vấn đề khớp háng";
-  if (clinicalPainKey === "co_tay") return hasRadiation ? "viêm gân hoặc vấn đề khớp cổ tay" : "vấn đề cơ gân vùng cổ tay";
-  if (clinicalPainKey === "ngon_tay_cai") return hasRadiation ? "viêm gân hoặc vấn đề khớp vùng ngón cái" : "vấn đề gân/khớp vùng ngón cái";
+  if (clinicalPainKey === "co_tay") return hasRadiation ? "viêm gân hoặc hội chứng ống cổ tay nếu có tê tay" : "viêm gân hoặc vấn đề cơ gân vùng cổ tay";
+  if (clinicalPainKey === "ngon_tay_cai") return hasRadiation ? "viêm gân hoặc hội chứng ống cổ tay nếu có tê tay" : "viêm gân hoặc vấn đề gân/khớp vùng ngón cái";
   if (clinicalPainKey === "tay") return sport ? "căng cơ/gân vùng tay do vận động" : "vấn đề cơ gân vùng tay";
   if (state.pain === "lưng" && hasRadiation) return "thoát vị đĩa đệm thắt lưng hoặc đau thần kinh tọa";
   if (state.pain === "lưng" && (noRadiation || sport)) return sport ? "căng cơ vùng thắt lưng hoặc vấn đề cột sống thắt lưng nhẹ" : "vấn đề cột sống thắt lưng";
@@ -1520,8 +1559,8 @@ function diseaseLabel(state) {
   if (state.pain === "vai" || state.pain === "vai gáy") return longTime ? "căng cơ vùng vai gáy hoặc vấn đề đốt sống cổ" : "căng cơ vùng vai gáy";
   if (state.pain === "gối") return "vấn đề khớp gối";
   if (state.pain === "háng") return "vấn đề khớp háng";
-  if (state.pain === "ngón tay cái") return hasRadiation ? "viêm gân hoặc vấn đề khớp vùng ngón cái" : "vấn đề gân/khớp vùng ngón cái";
-  if (state.pain === "cổ tay") return hasRadiation ? "viêm gân hoặc vấn đề khớp cổ tay" : "vấn đề cơ gân vùng cổ tay";
+  if (state.pain === "ngón tay cái") return hasRadiation ? "viêm gân hoặc hội chứng ống cổ tay nếu có tê tay" : "viêm gân hoặc vấn đề gân/khớp vùng ngón cái";
+  if (state.pain === "cổ tay") return hasRadiation ? "viêm gân hoặc hội chứng ống cổ tay nếu có tê tay" : "viêm gân hoặc vấn đề cơ gân vùng cổ tay";
   if (state.pain === "tay") return sport ? "căng cơ/gân vùng tay do vận động" : "vấn đề cơ gân vùng tay";
   return "";
 }
@@ -3130,6 +3169,61 @@ const server = http.createServer(async (req, res) => {
         model: OPENAI_MODEL,
         agenticReviewEnabled: AGENTIC_REVIEW_ENABLED,
         webhook: "/webhook",
+      });
+    }
+
+    if (req.method === "GET" && url.pathname === "/locks") {
+      const token = url.searchParams.get("token") || "";
+      if (REPORT_TOKEN && token !== REPORT_TOKEN) return text(res, 403, "Forbidden");
+      const pageId = url.searchParams.get("pageId") || "";
+      const locks = listHumanLocks(pageId);
+      return json(res, 200, {
+        ok: true,
+        pageId,
+        lockCount: locks.length,
+        locks,
+      });
+    }
+
+    if (req.method === "GET" && url.pathname === "/unlock-page") {
+      const token = url.searchParams.get("token") || "";
+      if (REPORT_TOKEN && token !== REPORT_TOKEN) return text(res, 403, "Forbidden");
+      const pageId = url.searchParams.get("pageId") || "";
+      if (!pageId) return json(res, 400, { ok: false, error: "Missing pageId" });
+      const unlocked = unlockPageLocks(pageId, "admin unlock page");
+      return json(res, 200, {
+        ok: true,
+        pageId,
+        unlocked,
+        remainingLocks: listHumanLocks(pageId).length,
+      });
+    }
+
+    if (req.method === "GET" && url.pathname === "/unlock") {
+      const token = url.searchParams.get("token") || "";
+      if (REPORT_TOKEN && token !== REPORT_TOKEN) return text(res, 403, "Forbidden");
+      const pageId = url.searchParams.get("pageId") || "";
+      const customerId = url.searchParams.get("customerId") || "";
+      const chatKey = url.searchParams.get("chatKey") || (pageId && customerId ? conversationKey(pageId, customerId) : "");
+      if (!chatKey) return json(res, 400, { ok: false, error: "Missing chatKey or pageId/customerId" });
+      const existed = unlockChatKey(chatKey, "admin unlock conversation");
+      return json(res, 200, {
+        ok: true,
+        chatKey,
+        existed,
+        lockedNow: isHumanTakenOver(chatKey),
+      });
+    }
+
+    if (req.method === "GET" && url.pathname === "/unlock-all") {
+      const token = url.searchParams.get("token") || "";
+      if (REPORT_TOKEN && token !== REPORT_TOKEN) return text(res, 403, "Forbidden");
+      const keys = [...humanTakenOverConversations];
+      for (const key of keys) unlockChatKey(key, "admin unlock all");
+      return json(res, 200, {
+        ok: true,
+        unlocked: keys.length,
+        remainingLocks: humanTakenOverConversations.size,
       });
     }
 
