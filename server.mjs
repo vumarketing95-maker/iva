@@ -219,6 +219,54 @@ function hasHumanOutboundInMemory(chatKey) {
   return recentConversation(chatKey, 20).some((item) => item.role === "human");
 }
 
+async function hydrateConversationFromGraphHistory(pageId, customerId, chatKey) {
+  if (!pageId || !customerId || !chatKey) return { humanReply: false };
+  const state = getCustomerState(chatKey);
+  const now = Date.now();
+  if (state.lastGraphHydratedAt && now - state.lastGraphHydratedAt < 20_000) {
+    return { humanReply: false, skipped: true };
+  }
+  state.lastGraphHydratedAt = now;
+
+  const data = await graphApiGet("me/conversations", pageId, {
+    user_id: customerId,
+    fields: "messages.limit(20){from,message,created_time}",
+    limit: "1",
+  });
+  const thread = data?.data?.[0];
+  const messages = Array.isArray(thread?.messages?.data) ? thread.messages.data.slice().reverse() : [];
+  if (!messages.length) return { humanReply: false };
+
+  for (const item of messages) {
+    const fromId = String(item?.from?.id || "");
+    const textValue = item?.message || "";
+    if (!textValue) continue;
+
+    if (fromId === String(pageId)) {
+      const isBotLike = looksLikeKnownBotMessage(textValue, state);
+      if (isBotLike) {
+        state.lastBotMessage = textValue;
+        const questionKey = messageQuestionKey(textValue);
+        if (questionKey) state.sentQuestionKeys.add(questionKey);
+        if (!state.sentMessageFingerprints) state.sentMessageFingerprints = new Set();
+        state.sentMessageFingerprints.add(messageFingerprint(textValue));
+        rememberConversationTurn(chatKey, "bot", textValue, { reason: "hydrated_graph_history", type: "bot_history" });
+        continue;
+      }
+      if (looksLikeHumanManualMessage(textValue)) {
+        markHumanTakeover(pageId, customerId, "graph hydrate detected human/manual page reply", textValue);
+        return { humanReply: true, text: textValue };
+      }
+      continue;
+    }
+
+    updateStateFromText(state, textValue);
+    rememberConversationTurn(chatKey, "customer", textValue, { reason: "hydrated_graph_history", type: "customer_history" });
+  }
+
+  return { humanReply: false };
+}
+
 const CLINIC = {
   address:
     "Dạ IVA có 2 cơ sở: 33N Hoàng Quốc Việt, Tân Mỹ và 94 Đường 56, Bình Trưng ạ.",
@@ -2857,6 +2905,11 @@ async function handleMessagingEvent(event) {
   try {
     const chatKey = conversationKey(pageId, senderId);
     recordChatEvent("customer", { pageId, chatKey, senderId, text: customerText });
+    const hydrated = await hydrateConversationFromGraphHistory(pageId, senderId, chatKey);
+    if (hydrated.humanReply) {
+      recordChatEvent("handoff", { pageId, chatKey, senderId, text: customerText, reason: "graph history hydrate detected human reply" });
+      return;
+    }
     const stateBeforeReply = getCustomerState(chatKey);
     const stateBeforeReplySnapshot = {
       askedPrice: Boolean(stateBeforeReply.askedPrice),
