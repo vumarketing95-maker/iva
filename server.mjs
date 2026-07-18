@@ -22,6 +22,7 @@ const customerStates = new Map();
 const processedMessageIds = new Set();
 const humanTakenOverConversations = loadHumanTakeovers();
 const recentBotEchoes = new Map();
+const conversationMemories = new Map();
 
 function parsePageTokens(rawValue) {
   if (!rawValue) return {};
@@ -117,6 +118,18 @@ function isHumanTakenOver(chatKey) {
   return Boolean(state?.humanTakeover);
 }
 
+function unlockConversation(pageId, customerId, reason = "manual start bot") {
+  if (!pageId || !customerId) return;
+  const chatKey = conversationKey(pageId, customerId);
+  humanTakenOverConversations.delete(chatKey);
+  saveHumanTakeovers();
+  const state = getCustomerState(chatKey);
+  state.humanTakeover = false;
+  state.stage = "bot_reenabled";
+  recordChatEvent("bot_reenabled", { pageId, chatKey, senderId: customerId, text: "", reason, state: stateSnapshot(state) });
+  console.log("Bot re-enabled", { chatKey, reason });
+}
+
 function isKnownPageId(id = "") {
   const value = String(id || "").trim();
   if (!value) return false;
@@ -146,6 +159,34 @@ function isKnownBotEcho(pageId, customerId, text = "") {
   if (!createdAt) return false;
   recentBotEchoes.delete(key);
   return Date.now() - createdAt < 10 * 60 * 1000;
+}
+
+function rememberConversationTurn(chatKey, role, text = "", meta = {}) {
+  if (!chatKey) return;
+  const history = conversationMemories.get(chatKey) || [];
+  history.push({
+    at: new Date().toISOString(),
+    role,
+    text: maskPrivateText(text || ""),
+    reason: meta.reason || "",
+    type: meta.type || "",
+  });
+  while (history.length > 40) history.shift();
+  conversationMemories.set(chatKey, history);
+}
+
+function recentConversation(chatKey, limit = 15) {
+  return (conversationMemories.get(chatKey) || []).slice(-limit);
+}
+
+function lastOutboundRole(chatKey) {
+  const history = recentConversation(chatKey, 20).slice().reverse();
+  const row = history.find((item) => item.role === "bot" || item.role === "human");
+  return row?.role || "";
+}
+
+function hasHumanOutboundInMemory(chatKey) {
+  return recentConversation(chatKey, 20).some((item) => item.role === "human");
 }
 
 const CLINIC = {
@@ -216,6 +257,7 @@ function stateSnapshot(state = {}) {
     group: state.leadGroup || "",
     temperature: state.temperature || "",
     pain: state.pain || "",
+    primaryPain: state.primaryPain || "",
     disease: state.disease || "",
     duration: state.duration || "",
     trigger: state.trigger || "",
@@ -242,7 +284,18 @@ function recordChatEvent(type, payload = {}) {
       text: maskPrivateText(payload.text || ""),
       reason: payload.reason || "",
       state: payload.state || null,
+      decision: payload.decision || null,
+      attemptedReply: payload.attemptedReply ? maskPrivateText(payload.attemptedReply) : "",
+      quality: payload.quality || null,
     };
+    if (row.chatKey) {
+      const role =
+        type === "customer" ? "customer" :
+        type === "bot" ? "bot" :
+        type === "human_takeover" ? "human" :
+        "system";
+      rememberConversationTurn(row.chatKey, role, row.text, { reason: row.reason, type });
+    }
     fs.appendFileSync(chatLogFile(), `${JSON.stringify(row)}\n`, "utf8");
   } catch (error) {
     console.error("Cannot write chat log:", error.message);
@@ -305,6 +358,68 @@ function botRiskFlags(row, previousBotByChat) {
   return flags;
 }
 
+function qualityByConversation(rows = []) {
+  const grouped = new Map();
+  for (const row of rows) {
+    if (!row.chatKey) continue;
+    if (!grouped.has(row.chatKey)) grouped.set(row.chatKey, []);
+    grouped.get(row.chatKey).push(row);
+  }
+
+  const results = [];
+  for (const [chatKey, chatRows] of grouped.entries()) {
+    const flags = new Set();
+    let score = 10;
+    let lastCustomer = "";
+    let lastBot = "";
+    let humanSeen = false;
+    let phoneSeen = false;
+    let lastBotText = "";
+    let botAfterHuman = 0;
+
+    for (const row of chatRows) {
+      if (row.type === "customer") {
+        lastCustomer = row.text || "";
+        if (hasPhoneNumber(row.text || "")) phoneSeen = true;
+      }
+      if (row.type === "human_takeover" || String(row.reason || "").includes("human")) {
+        humanSeen = true;
+      }
+      if (row.type === "bot") {
+        lastBot = row.text || "";
+        if (humanSeen || phoneSeen) {
+          flags.add("Bot van nhan sau khi nguoi that/SDT xuat hien");
+          botAfterHuman += 1;
+        }
+        if (lastBotText && normalizeText(lastBotText) === normalizeText(row.text || "")) {
+          flags.add("Bot lap lai cau cu");
+        }
+        for (const flag of botRiskFlags(row, new Map([[chatKey, lastBotText]]))) flags.add(flag);
+        lastBotText = row.text || "";
+      }
+      if (row.type === "handoff" && /final gate|graph history|memory detected|human already/.test(row.reason || "")) {
+        flags.add("Bot da tu chan dung tinh huong can dung");
+      }
+    }
+
+    if (botAfterHuman) score -= 5;
+    if ([...flags].some((flag) => /sai v|sai lu/.test(normalizeText(flag)))) score -= 3;
+    if ([...flags].some((flag) => /lap/.test(normalizeText(flag)))) score -= 2;
+    if ([...flags].some((flag) => /ngon tu|dia chi|gia/.test(normalizeText(flag)))) score -= 1;
+
+    results.push({
+      chatKey,
+      score: Math.max(0, Math.min(10, score)),
+      flags: [...flags],
+      lastCustomer,
+      lastBot,
+      messages: chatRows.length,
+    });
+  }
+
+  return results.sort((a, b) => a.score - b.score || b.messages - a.messages);
+}
+
 function reportHtml(rows) {
   const customerTopics = new Map();
   const pains = new Map();
@@ -356,6 +471,10 @@ function reportHtml(rows) {
     ? humanExamples.map((item) => `<li><b>${esc(item.text)}</b><br><small>${esc(item.at)} | ${esc(item.chatKey)} | ${esc(item.reason)}</small></li>`).join("")
     : "<li>Chưa có nội dung người thật nhắn được ghi nhận.</li>";
 
+  const qualityRows = qualityByConversation(rows);
+  const avgQuality = qualityRows.length ? (qualityRows.reduce((sum, item) => sum + item.score, 0) / qualityRows.length).toFixed(1) : "10.0";
+  const qualityTable = qualityRows.slice(0, 40).map((item) => `<tr><td>${esc(item.chatKey)}</td><td><b>${item.score}/10</b></td><td>${esc(item.flags.join("; ") || "On")}</td><td>${esc(item.lastCustomer)}</td><td>${esc(item.lastBot)}</td></tr>`).join("") || `<tr><td colspan="5">Chua co du lieu</td></tr>`;
+
   return `<!doctype html>
 <html lang="vi">
 <head>
@@ -382,7 +501,10 @@ function reportHtml(rows) {
     <div class="card"><div class="num">${botMessages}</div><div>Tin bot</div></div>
     <div class="card"><div class="num">${handoffs}</div><div>Lần bot dừng</div></div>
     <div class="card"><div class="num">${humanLocks}</div><div>Khóa khi người thật nhắn</div></div>
+    <div class="card"><div class="num">${avgQuality}</div><div>Điểm chất lượng TB</div></div>
   </div>
+  <h2>Chat cần ưu tiên kiểm tra</h2>
+  <table><tr><th>Cuộc chat</th><th>Điểm</th><th>Cờ lỗi/cảnh báo</th><th>Tin khách gần nhất</th><th>Tin bot gần nhất</th></tr>${qualityTable}</table>
   <h2>Khách hay hỏi/chia sẻ gì</h2>
   <table><tr><th>Nhóm nội dung</th><th>Số lần</th></tr>${list(topCounts(customerTopics))}</table>
   <h2>Vùng đau được nhắc nhiều</h2>
@@ -468,6 +590,7 @@ function getCustomerState(senderId) {
     customerStates.set(senderId, {
       persona: "mình",
       pain: "",
+      primaryPain: "",
       disease: "",
       duration: "",
       trigger: "",
@@ -585,6 +708,30 @@ function detectPain(rawText) {
   return "";
 }
 
+function detectExplicitPain(rawText) {
+  const text = chatText(rawText);
+  if (isUnclearJointComplaint(rawText)) return "";
+
+  if (/(hoi chung ong co tay|ong co tay|te dau ngon tay|te ngon tay|te dau ngon|te ngon cai|te dau ngon cai)/.test(text)) return "cá»• tay";
+  if (/(co vai gay|vai gay|dau vai gay|dau moi vai gay|dau co vai gay|co gay|dau vung co|vung co|dau co|mo co)/.test(text)) return "vai gÃ¡y";
+  if (/(dau vai|moi vai|nhuc vai)/.test(text)) return "vai";
+  if (/(that lung|dau lung|dau that lung|song lung|dau song lung|te chan|than kinh toa)/.test(text)) return "lÆ°ng";
+  if (/(dau goi|khop goi|vung goi|nhuc goi|moi goi|^goi$)/.test(text)) return "gá»‘i";
+  if (/(khop hang|dau hang|vung hang)/.test(text)) return "hÃ¡ng";
+  if (/(ngon tay cai|ngon cai|dau ngon tay|dau ngon cai|te ngon tay|te ngon cai)/.test(text)) return "ngÃ³n tay cÃ¡i";
+  if (/(co tay|dau co tay|te co tay)/.test(text)) return "cá»• tay";
+  if (/(khuyu tay|khuu tay|elbow|tennis elbow|dau tay)/.test(text)) return "tay";
+  return "";
+}
+
+function shouldAllowPainUpdate(state, pain, explicitPain = "") {
+  if (!pain) return false;
+  const lockedPain = state.primaryPain || state.pain || "";
+  if (!lockedPain) return true;
+  if (explicitPain) return true;
+  return pain === lockedPain;
+}
+
 function isUnclearJointComplaint(rawText) {
   const text = chatText(rawText);
   const mentionsJoint = /(dau khop|moi khop|nhuc khop|viem khop|thoai hoa khop|khop bi dau|khop dau)/.test(text);
@@ -608,7 +755,8 @@ function detectDisease(rawText) {
 function detectDuration(rawText) {
   const text = chatText(rawText);
   if (/^\d+\s*(ngay|tuan|thang|nam)/.test(text)) return rawText.trim();
-  if (/(hom qua|moi day|gan day|vua bi|moi|tuan|thang|nam|ngay)/.test(text)) return rawText.trim();
+  if (/(hom qua|moi day|gan day|vua bi|moi bi|moi gan day|may hom|vai hom|tuan|thang|nam|ngay)/.test(text)) return rawText.trim();
+  if (/^(moi|moi em|moi a|moi anh|moi chi|gan day|gan day em)$/.test(text)) return rawText.trim();
   return "";
 }
 
@@ -830,6 +978,7 @@ function resetClinicalIfNewTopic(state, pain, disease) {
   if (!changedPain && !changedDisease) return;
 
   state.pain = "";
+  state.primaryPain = pain || "";
   state.disease = "";
   state.duration = "";
   state.trigger = "";
@@ -911,10 +1060,14 @@ function branchChoiceReply(state, rawText = "") {
 
 function updateStateFromText(state, rawText) {
   detectPersona(rawText, state);
+  if (!state.primaryPain && state.pain) state.primaryPain = state.pain;
 
-  const pain = detectPain(rawText);
+  const explicitPain = detectExplicitPain(rawText);
+  const detectedPain = detectPain(rawText);
+  const pain = explicitPain || detectedPain;
   const disease = detectDisease(rawText);
-  resetClinicalIfNewTopic(state, pain, disease);
+  const canUpdatePain = shouldAllowPainUpdate(state, pain, explicitPain);
+  resetClinicalIfNewTopic(state, canUpdatePain ? pain : "", disease);
 
   const yesNo = detectYesNo(rawText);
   const duration = detectDuration(rawText);
@@ -925,8 +1078,12 @@ function updateStateFromText(state, rawText) {
   const customerName = detectCustomerName(rawText);
   const appointmentTime = detectAppointmentTime(rawText);
 
-  if (pain) state.pain = pain;
+  if (pain && canUpdatePain) {
+    state.pain = pain;
+    if (!state.primaryPain || explicitPain) state.primaryPain = pain;
+  }
   if (disease) state.disease = disease;
+  const painBeforeNumbness = { pain: state.pain, primaryPain: state.primaryPain };
   if (isNumbnessComplaint(rawText)) {
     state.pain = "cổ tay";
     state.radiation = "tay";
@@ -937,9 +1094,17 @@ function updateStateFromText(state, rawText) {
       state.trigger = "";
     }
   }
+  if (painBeforeNumbness.primaryPain && painKey(painBeforeNumbness.primaryPain) !== "tay" && painKey(painBeforeNumbness.primaryPain) !== "co_tay" && painKey(painBeforeNumbness.primaryPain) !== "ngon_tay_cai") {
+    state.pain = painBeforeNumbness.pain;
+    state.primaryPain = painBeforeNumbness.primaryPain;
+  }
   if (!pain && /(te chu khong phai dau|te hon|te buot|te dau ngon|te ngon tay|te ngon cai|ong co tay)/.test(chatText(rawText))) {
     if (state.pain === "háng" || state.pain === "gối" || !state.pain) state.pain = "cổ tay";
     if (!state.disease && /ong co tay/.test(chatText(rawText))) state.disease = "hội chứng ống cổ tay";
+  }
+  if (painBeforeNumbness.primaryPain && painKey(painBeforeNumbness.primaryPain) !== "tay" && painKey(painBeforeNumbness.primaryPain) !== "co_tay" && painKey(painBeforeNumbness.primaryPain) !== "ngon_tay_cai") {
+    state.pain = painBeforeNumbness.pain;
+    state.primaryPain = painBeforeNumbness.primaryPain;
   }
   if (duration) state.duration = duration;
   if (trigger) state.trigger = trigger;
@@ -997,6 +1162,44 @@ function multiResult(state, messages, lastQuestion = "") {
 function handoff(reason = "") {
   if (reason) console.log("Silent handoff reason:", reason);
   return { action: "HANDOFF", message: "" };
+}
+
+function agenticProfile(state, customerText = "") {
+  const pain = state.primaryPain || state.pain || "";
+  const painRegion = painKey(pain);
+  const missing = [];
+  if (!pain && !state.disease) missing.push("pain");
+  if ((pain || state.disease) && !state.duration && !state.askedFields.has("duration")) missing.push("duration");
+  if (pain && !state.trigger && !state.askedFields.has("trigger")) missing.push("trigger");
+  if ((painRegion === "lung" || painRegion === "vai" || painRegion === "vai_gay" || painRegion === "tay" || painRegion === "co_tay" || painRegion === "ngon_tay_cai") && !state.radiation && !state.askedFields.has("radiation")) {
+    missing.push("radiation");
+  }
+
+  return {
+    mode: "agentic_iva_v1",
+    intent: detectCustomerIntent(customerText, state),
+    pain,
+    painRegion,
+    disease: state.disease || "",
+    duration: state.duration || "",
+    trigger: state.trigger || "",
+    radiation: state.radiation || "",
+    askedPrice: Boolean(state.askedPrice || isPriceQuestion(customerText)),
+    askedAddress: Boolean(state.askedAddress || isAddressQuestion(customerText)),
+    humanTakeover: Boolean(state.humanTakeover),
+    missing,
+    canAssess: missing.filter((item) => item !== "radiation").length === 0 && (missing.indexOf("radiation") === -1 || state.askedFields.has("radiation")),
+    canPrice: hasEnoughForPrice(state),
+  };
+}
+
+function agenticMissingReply(state) {
+  const profile = agenticProfile(state);
+  if (profile.missing.includes("pain")) return askProblem(state);
+  if (profile.missing.includes("duration")) return askDuration(state);
+  if (profile.missing.includes("trigger")) return askTrigger(state);
+  if (profile.missing.includes("radiation")) return askRadiation(state);
+  return null;
 }
 
 function branchAddress(branch = "") {
@@ -1133,7 +1336,19 @@ function diseaseLabel(state) {
   const longTime = /(thang|nam)/.test(normalizeText(state.duration));
   const sport = /(tap|gym|the thao|van dong)/.test(normalizeText(state.trigger));
 
+  const clinicalPain = state.primaryPain || state.pain;
+  const clinicalPainKey = painKey(clinicalPain);
   if (state.disease) return state.disease;
+  if (clinicalPainKey === "lung" && hasRadiation) return "thoát vị đĩa đệm thắt lưng hoặc đau thần kinh tọa";
+  if (clinicalPainKey === "lung" && (noRadiation || sport)) return sport ? "căng cơ vùng thắt lưng hoặc vấn đề cột sống thắt lưng nhẹ" : "vấn đề cột sống thắt lưng";
+  if (clinicalPainKey === "lung") return longTime ? "vấn đề cột sống thắt lưng" : "căng cơ hoặc vấn đề cột sống thắt lưng";
+  if ((clinicalPainKey === "vai" || clinicalPainKey === "vai_gay") && hasRadiation) return "thoái hóa đốt sống cổ hoặc chèn ép rễ thần kinh";
+  if (clinicalPainKey === "vai" || clinicalPainKey === "vai_gay") return longTime ? "căng cơ vùng vai gáy hoặc vấn đề đốt sống cổ" : "căng cơ vùng vai gáy";
+  if (clinicalPainKey === "goi") return "vấn đề khớp gối";
+  if (clinicalPainKey === "hang") return "vấn đề khớp háng";
+  if (clinicalPainKey === "co_tay") return hasRadiation ? "viêm gân hoặc vấn đề khớp cổ tay" : "vấn đề cơ gân vùng cổ tay";
+  if (clinicalPainKey === "ngon_tay_cai") return hasRadiation ? "viêm gân hoặc vấn đề khớp vùng ngón cái" : "vấn đề gân/khớp vùng ngón cái";
+  if (clinicalPainKey === "tay") return sport ? "căng cơ/gân vùng tay do vận động" : "vấn đề cơ gân vùng tay";
   if (state.pain === "lưng" && hasRadiation) return "thoát vị đĩa đệm thắt lưng hoặc đau thần kinh tọa";
   if (state.pain === "lưng" && (noRadiation || sport)) return sport ? "căng cơ vùng thắt lưng hoặc vấn đề cột sống thắt lưng nhẹ" : "vấn đề cột sống thắt lưng";
   if (state.pain === "lưng") return longTime ? "vấn đề cột sống thắt lưng" : "căng cơ hoặc vấn đề cột sống thắt lưng";
@@ -1149,6 +1364,8 @@ function diseaseLabel(state) {
 
 function assessmentReply(state) {
   if (state.assessmentSent) return handoff("assessment already sent");
+  const missingReply = agenticMissingReply(state);
+  if (missingReply) return missingReply;
 
   const s = subject(state);
   const likely = diseaseLabel(state);
@@ -1304,6 +1521,18 @@ function hasEnoughForPrice(state) {
     return Boolean(state.duration && (state.treated || state.radiation));
   }
 
+  if (!state.pain && !state.primaryPain) return false;
+  const clinicalPainKey = painKey(state.primaryPain || state.pain);
+  if (clinicalPainKey === "lung" || clinicalPainKey === "vai" || clinicalPainKey === "vai_gay") {
+    return Boolean(state.duration && state.trigger && state.radiation);
+  }
+  if (clinicalPainKey === "ngon_tay_cai" || clinicalPainKey === "co_tay" || clinicalPainKey === "tay") {
+    return Boolean(state.duration && state.trigger && state.radiation);
+  }
+  if (clinicalPainKey === "goi" || clinicalPainKey === "hang") {
+    return Boolean(state.duration && state.trigger);
+  }
+
   if (!state.pain) return false;
   if (state.pain === "lưng" || state.pain === "vai" || state.pain === "vai gáy") {
     return Boolean(state.duration && state.trigger && state.radiation);
@@ -1420,7 +1649,7 @@ function handleDeterministicFlow(senderId, customerText) {
   const state = getCustomerState(senderId);
   state.messageCount += 1;
   updateStateFromText(state, customerText);
-  const currentPain = detectPain(customerText);
+  const currentPain = detectExplicitPain(customerText) || (!state.primaryPain ? detectPain(customerText) : "");
   const currentDisease = detectDisease(customerText);
   const currentArea = detectAreaHint(customerText);
 
@@ -1528,7 +1757,7 @@ function diagnosisRegionKeys(message = "") {
 }
 
 function allowedDiagnosisRegionsForPain(state) {
-  const currentPainKey = painKey(state.pain);
+  const currentPainKey = painKey(state.primaryPain || state.pain);
   if (currentPainKey === "lung") return new Set(["lung"]);
   if (currentPainKey === "vai" || currentPainKey === "vai_gay") return new Set(["vai_gay", "tay"]);
   if (currentPainKey === "goi") return new Set(["goi"]);
@@ -1538,7 +1767,8 @@ function allowedDiagnosisRegionsForPain(state) {
 }
 
 function diagnosisRegionConflictReason(state, message = "") {
-  if (!state.pain) return "";
+  const lockedPain = state.primaryPain || state.pain;
+  if (!lockedPain) return "";
   const mentionedRegions = diagnosisRegionKeys(message);
   if (!mentionedRegions.size) return "";
 
@@ -1548,7 +1778,7 @@ function diagnosisRegionConflictReason(state, message = "") {
   const wrongRegions = [...mentionedRegions].filter((region) => !allowedRegions.has(region));
   if (!wrongRegions.length) return "";
 
-  return `blocked diagnosis region mismatch: pain=${painKey(state.pain)} replyRegions=${[...mentionedRegions].join(",")}`;
+  return `blocked diagnosis region mismatch: pain=${painKey(lockedPain)} replyRegions=${[...mentionedRegions].join(",")}`;
 }
 
 function finalReplyGate(chatKey, pageId, senderId, customerText, messages, stateBeforeReply = {}) {
@@ -1637,7 +1867,7 @@ function responseGuardSingle(state, rawMessage) {
   const textValue = normalizeText(message);
   const lastText = normalizeText(state.lastBotMessage || "");
   const questionKey = messageQuestionKey(message);
-  const currentPainKey = painKey(state.pain);
+  const currentPainKey = painKey(state.primaryPain || state.pain);
   const diagnosisConflict = diagnosisRegionConflictReason(state, message);
   if (diagnosisConflict) return handoff(diagnosisConflict);
 
@@ -1813,9 +2043,79 @@ function logLeadSignal(senderId, state, customerText, botMessage = "") {
   });
 }
 
+function agenticOperatingCore(state = {}) {
+  return {
+    name: "IVA_AGENTIC_CORE_V2",
+    mission: [
+      "Tu van nhu nhan su chatpage that, ngan gon, gan, co muc tieu dua khach den phong kham kiem tra.",
+      "Khong hoi theo suon may moc. Moi cau phai co y do: khai thac dau hieu, tra loi y khach, chot lich, hoac im de nguoi lam.",
+      "Khach hoi gi thi xu ly dung y do truoc. Khong keo khach quay lai cau hoi trieu chung neu khach dang hoi gia, dia chi, lich, so may, hoac da gui SDT.",
+    ],
+    thinkingLoopBeforeEveryReply: [
+      "Doc lai mach chat gan nhat, khong chi doc tin cuoi.",
+      "Xac dinh khach vua hoi gi that su va co bao nhieu y trong mot tin.",
+      "Kiem tra knownInfo: vung dau, thoi gian, nguyen nhan, lan/te, da dieu tri, gia/dia chi/lich da noi chua.",
+      "Neu thong tin da co thi cam hoi lai duoi moi hinh thuc.",
+      "Chon dung mot hanh dong: tra loi thang, hoi 1 y con thieu, nhan dinh so bo, bao uu dai, gui dia chi, xin ten/SDT, hoac HANDOFF im lang.",
+      "Tu kiem tra cau sap gui: co lap khong, co sai vung khong, co qua dai khong, co giong bot khong, co lam khach kho chiu khong.",
+      "Neu khong chac hoac cau sap gui khong dat, HANDOFF im lang.",
+    ],
+    actionPriority: [
+      "Nguoi that/Page da nhan hoac da co SDT: dung bot ngay.",
+      "Khach hoi dia chi/o dau/so may/duong nao: gui dia chi truoc, sau do hoi khach qua chi nhanh 1 hay chi nhanh 2 neu can giu lich.",
+      "Khach hoi gia dau cuoc: chua bao gia, hoi 1 y de nam tinh trang.",
+      "Khach da du dau hieu hoac da co nhan dinh so bo roi hoi gia: bao uu dai ngay, khong hoi them.",
+      "Khach noi se qua/hom nay/mai/may gio/dat lich: xin hoac xac nhan co so + ten + SDT + gio, chi hoi phan con thieu.",
+      "Khach hoi 2 y trong 1 tin: xu ly du 2 y, khong bo sot.",
+      "Khach hoi benh gi/cu the la gi: nhan dinh so bo dung vung, khong lap cau chung chung.",
+    ],
+    regionLogic: [
+      "Lung/that lung: chi hoi ngoi lau, di lai, lan xuong mong/chan, te chan; nhan dinh cot song that lung, thoat vi dia dem that lung, than kinh toa, hoac cang co lung.",
+      "Co/vai gay: chi hoi ngoi lau, dung dien thoai, lan/te tay, dau dau neu can; nhan dinh cang co vai gay, thoai hoa dot song co, chen ep re than kinh.",
+      "Tay/co tay/ngon tay/ngon cai: hoi te/buot/cam nam/cam do, van dong ngon/co tay; khong hoi di lai hay khop hang/goi.",
+      "Goi: chi khi khach noi ro goi; hoi di lai, len xuong cau thang, dau nhoi/cung khop.",
+      "Hang: chi khi khach noi ro hang/khop hang; khong duoc doc nham 'thang' thanh 'hang'.",
+      "Dau khop chung chung: hoi khop nao, khong tu hieu la khop goi.",
+      "Te tay chan: hoi tach vung 'minh thay te tay nhieu hon hay te chan nhieu hon a?', khong ket luan voi.",
+    ],
+    languageStyle: [
+      "Dung 'minh' neu chua ro vai ve; chi dung anh/chi/co/chu khi khach tu xung hoac ngu canh ro.",
+      "Khong dung: ban, quy khach, tinh trang cu the, dau vi tri nao.",
+      "Moi tin 1 diem cham, ngan va co cam giac nguoi that.",
+      "Khach ngan thi dap ngan; khach voi thi di thang vao lich; khach lo gia thi noi mem.",
+    ],
+    absoluteStops: [
+      "Co tin nhan nguoi that/Page khong phai bot trong cuoc chat.",
+      "Khach gui so dien thoai.",
+      "Khach dang hoan/doi/huy lich/bao ban sau khi da co lich.",
+      "Khach hoi ngoai thong tin phong kham chua duoc cap: gio lam viec chua cap, cam ket khoi, bac si cu the, bao hanh, massage thu gian, buoi le.",
+      "Cau tra loi sap gui lap y cu, sai vung, hoac khong tra loi dung cau khach vua hoi.",
+    ],
+    pricingRule: [
+      "Khong bao gia theo benh ly khi chua nam tinh trang.",
+      "Chi bao uu dai sau khi da co du dau hieu/nhan dinh so bo.",
+      "Cau gia dung: Sau khi kham bac si se trao doi ky lo trinh va chi phi cho minh. Dat lich online ben em dang co uu dai 499k/5 buoi tri lieu bam huyet.",
+      "Khach hoi phat sinh/ep mua: Sau khi kham bac si se trao doi ro lo trinh va chi phi, minh dong y thi minh lam a.",
+    ],
+    currentKnownState: {
+      pain: state.primaryPain || state.pain || "",
+      disease: state.disease || "",
+      duration: state.duration || "",
+      trigger: state.trigger || "",
+      radiation: state.radiation || "",
+      assessmentSent: Boolean(state.assessmentSent),
+      priceSent: Boolean(state.priceSent),
+      addressSent: Boolean(state.addressSent),
+      bookingAsked: Boolean(state.bookingAsked),
+      humanTakeover: Boolean(state.humanTakeover),
+    },
+  };
+}
+
 function buildBrainContext(state, customerText) {
   return {
     customerText,
+    agenticOperatingCore: agenticOperatingCore(state),
     mustThinkBeforeReply: [
       "1. Khách vừa hỏi/nhắn điều gì thật sự?",
       "2. Ý khách đang cần xử lý ngay là giá, địa chỉ, lịch, triệu chứng, SĐT, hay đổi/hoãn lịch?",
@@ -2007,6 +2307,65 @@ async function graphApi(path, body, pageId = "") {
   }
 }
 
+async function graphApiGet(path, pageId = "", params = {}) {
+  const accessToken = tokenForPage(pageId);
+  const tokenSource = tokenSourceForPage(pageId);
+  if (!accessToken) {
+    console.error("Missing page token for GET", { pageId });
+    return null;
+  }
+
+  const query = new URLSearchParams({ ...params, access_token: accessToken });
+  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${path}?${query.toString()}`;
+  const response = await fetch(url, { method: "GET" });
+  const bodyText = await response.text();
+  let data = null;
+  try {
+    data = bodyText ? JSON.parse(bodyText) : null;
+  } catch {
+    data = { raw: bodyText };
+  }
+  if (!response.ok) {
+    console.error("Graph API GET error", response.status, {
+      pageId,
+      tokenSource,
+      graphPath: path,
+      error: bodyText,
+    });
+    return null;
+  }
+  return data;
+}
+
+function looksLikeKnownBotMessage(textValue = "", state = {}) {
+  const textNorm = normalizeText(textValue);
+  if (!textNorm) return false;
+  if (state.lastBotMessage && normalizeText(state.lastBotMessage) === textNorm) return true;
+  if (state.sentMessageFingerprints?.has?.(messageFingerprint(textValue))) return true;
+  if (/dau .* lau chua|moi dau gan day|ngoi lau|di lai|lan xuong|te tay|te chan|bac si kiem tra|dat lich online|499k|chi nhanh 1|chi nhanh 2|33n|94 duong 56/.test(textNorm)) return true;
+  return false;
+}
+
+async function hasExternalPageReply(pageId, customerId, chatKey) {
+  if (!pageId || !customerId) return false;
+  const state = getCustomerState(chatKey);
+  const data = await graphApiGet("me/conversations", pageId, {
+    user_id: customerId,
+    fields: "messages.limit(8){from,message,created_time}",
+    limit: "1",
+  });
+  const thread = data?.data?.[0];
+  const messages = Array.isArray(thread?.messages?.data) ? thread.messages.data : [];
+  for (const item of messages) {
+    const fromId = String(item?.from?.id || "");
+    const textValue = item?.message || "";
+    if (fromId !== String(pageId) || !textValue) continue;
+    if (looksLikeKnownBotMessage(textValue, state)) continue;
+    return { text: textValue, createdTime: item?.created_time || "" };
+  }
+  return false;
+}
+
 async function senderAction(recipientId, action, pageId = "") {
   await graphApi("me/messages", {
     recipient: { id: recipientId },
@@ -2047,6 +2406,14 @@ async function handleMessagingEvent(event) {
     const echoPageId = event.sender?.id || "";
     const echoCustomerId = event.recipient?.id || "";
     const echoText = message.text?.trim() || "";
+    if (/^\/stopbot\b/i.test(echoText)) {
+      markHumanTakeover(echoPageId, echoCustomerId, "manual /stopbot", echoText);
+      return;
+    }
+    if (/^\/startbot\b/i.test(echoText)) {
+      unlockConversation(echoPageId, echoCustomerId, "manual /startbot");
+      return;
+    }
     if (isKnownBotEcho(echoPageId, echoCustomerId, echoText)) {
       console.log("Ignored bot echo", { pageId: echoPageId, customerId: echoCustomerId, appId: message.app_id || "" });
       return;
@@ -2072,6 +2439,17 @@ async function handleMessagingEvent(event) {
       assessmentSent: Boolean(stateBeforeReply.assessmentSent),
       humanTakeover: Boolean(stateBeforeReply.humanTakeover),
     };
+    if (hasHumanOutboundInMemory(chatKey) || lastOutboundRole(chatKey) === "human") {
+      lockConversation(pageId, senderId, "memory detected human already replied - bot stopped", customerText);
+      recordChatEvent("handoff", { pageId, chatKey, senderId, text: customerText, reason: "memory detected human already replied" });
+      return;
+    }
+    const externalPageReply = await hasExternalPageReply(pageId, senderId, chatKey);
+    if (externalPageReply) {
+      markHumanTakeover(pageId, senderId, "graph history detected page/human reply before bot send", externalPageReply.text || "");
+      recordChatEvent("handoff", { pageId, chatKey, senderId, text: customerText, reason: "graph history detected page/human reply" });
+      return;
+    }
     if (isCustomerEndingOrDeclining(customerText)) {
       lockConversation(pageId, senderId, "customer ended/declined - do not continue", customerText);
       return;
@@ -2097,6 +2475,7 @@ async function handleMessagingEvent(event) {
     await senderAction(senderId, "typing_on", pageId);
     const deterministic = handleDeterministicFlow(chatKey, customerText);
     const state = getCustomerState(chatKey);
+    const profile = agenticProfile(state, customerText);
     const guarded = await smartReply(chatKey, customerText, deterministic);
     const decisionTrace = {
       detectedPainFromCustomer: detectPain(customerText) || "",
@@ -2107,10 +2486,12 @@ async function handleMessagingEvent(event) {
       intent: state.customerIntent,
       stage: state.stage,
       painInMemory: state.pain,
+      primaryPainInMemory: state.primaryPain,
       diseaseInMemory: state.disease,
       durationInMemory: state.duration,
       triggerInMemory: state.trigger,
       radiationInMemory: state.radiation,
+      agenticProfile: profile,
       deterministicAction: deterministic?.action || "",
       deterministicMessage: deterministic?.message || "",
       guardedAction: guarded?.action || "",
@@ -2140,6 +2521,17 @@ async function handleMessagingEvent(event) {
       if (isHumanTakenOver(chatKey)) {
         console.log("AI send cancelled because human took over during delay", { chatKey });
         recordChatEvent("handoff", { pageId, chatKey, senderId, text: outgoingMessage, reason: "cancelled before send: human takeover", state: stateSnapshot(state) });
+        return;
+      }
+      if (hasHumanOutboundInMemory(chatKey) || lastOutboundRole(chatKey) === "human") {
+        console.log("AI send cancelled because memory found human message", { chatKey });
+        recordChatEvent("handoff", { pageId, chatKey, senderId, text: outgoingMessage, reason: "cancelled before send: human in memory", state: stateSnapshot(state) });
+        return;
+      }
+      const externalPageReplyBeforeSend = await hasExternalPageReply(pageId, senderId, chatKey);
+      if (externalPageReplyBeforeSend) {
+        markHumanTakeover(pageId, senderId, "graph history detected human reply during send delay", externalPageReplyBeforeSend.text || "");
+        recordChatEvent("handoff", { pageId, chatKey, senderId, text: outgoingMessage, reason: "cancelled before send: graph human reply", state: stateSnapshot(state) });
         return;
       }
       rememberBotEcho(pageId, senderId, outgoingMessage);
@@ -2212,6 +2604,18 @@ const server = http.createServer(async (req, res) => {
       const token = url.searchParams.get("token") || "";
       if (REPORT_TOKEN && token !== REPORT_TOKEN) return text(res, 403, "Forbidden");
       return html(res, 200, reportHtml(readRecentChatRows(7)));
+    }
+
+    if (req.method === "GET" && url.pathname === "/report.json") {
+      const token = url.searchParams.get("token") || "";
+      if (REPORT_TOKEN && token !== REPORT_TOKEN) return text(res, 403, "Forbidden");
+      const rows = readRecentChatRows(7);
+      return json(res, 200, {
+        ok: true,
+        days: 7,
+        conversations: qualityByConversation(rows),
+        rows,
+      });
     }
 
     if (req.method === "GET" && url.pathname === "/webhook") return handleWebhookVerify(req, res, url);
