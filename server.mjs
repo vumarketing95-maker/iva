@@ -157,9 +157,38 @@ function rememberBotEcho(pageId, customerId, text = "") {
 function isKnownBotEcho(pageId, customerId, text = "") {
   const key = botEchoKey(pageId, customerId, text);
   const createdAt = recentBotEchoes.get(key);
-  if (!createdAt) return false;
-  recentBotEchoes.delete(key);
-  return Date.now() - createdAt < 10 * 60 * 1000;
+  if (createdAt) {
+    recentBotEchoes.delete(key);
+    return Date.now() - createdAt < 10 * 60 * 1000;
+  }
+
+  const chatKey = conversationKey(pageId, customerId);
+  const textNorm = normalizeText(text);
+  const fp = messageFingerprint(text);
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  for (const [echoKey, rememberedAt] of recentBotEchoes) {
+    if (rememberedAt < cutoff) {
+      recentBotEchoes.delete(echoKey);
+      continue;
+    }
+    if (!echoKey.startsWith(`${chatKey}::`)) continue;
+    const rememberedText = echoKey.slice(`${chatKey}::`.length);
+    if (
+      rememberedText === textNorm.slice(0, 220) ||
+      rememberedText === fp ||
+      rememberedText.includes(fp) ||
+      fp.includes(rememberedText.slice(0, Math.min(80, rememberedText.length)))
+    ) {
+      recentBotEchoes.delete(echoKey);
+      return true;
+    }
+  }
+
+  const state = getCustomerState(chatKey);
+  if (state.lastBotMessage && normalizeText(state.lastBotMessage) === textNorm) return true;
+  if (state.sentMessageFingerprints?.has?.(fp)) return true;
+  if (looksLikeKnownBotMessage(text, state)) return true;
+  return false;
 }
 
 function rememberConversationTurn(chatKey, role, text = "", meta = {}) {
