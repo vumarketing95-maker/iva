@@ -816,7 +816,8 @@ function detectCustomerName(rawText = "") {
   const cleaned = noPhone.replace(/[()\-–—:;,.]/g, " ").replace(/\s+/g, " ").trim();
   const text = chatText(cleaned);
   if (!cleaned || cleaned.length < 4) return "";
-  if (/(hom nay|ngay mai|mai|qua|binh trung|hoang quoc viet|dia chi|gia|phi|dau|moi|lau|co|khong|kham|lich|sang|chieu|toi)/.test(text)) {
+  if (isOpenConsultation(rawText)) return "";
+  if (/(hom nay|ngay mai|mai|qua|binh trung|hoang quoc viet|dia chi|gia|phi|dau|moi|lau|co|khong|kham|lich|sang|chieu|toi|tu van|xin tu van|tv|can tu van|nho tu van)/.test(text)) {
     return "";
   }
   const words = cleaned.split(/\s+/).filter(Boolean);
@@ -946,6 +947,15 @@ function isPing(rawText) {
   return /^(alo|hello|helo|hi|chao|tu van|can tu van|em oi|e oi|co ai khong)$/.test(text);
 }
 
+function isOpenConsultation(rawText) {
+  const text = chatText(rawText);
+  if (isPing(rawText)) return true;
+  if (/^(tv|tu van|xin tu van|can tu van|nho tu van|cho tu van|muon tu van)(\s+(anh|chi|em|voi|nhe|a|ah))?$/.test(text)) return true;
+  if (/^(chao|hello|helo|alo)\s+(tv|tu van)$/.test(text)) return true;
+  if (/\b(xin tu van|can tu van|nho tu van|muon tu van)\b/.test(text) && text.length <= 60) return true;
+  return false;
+}
+
 function isOutOfScopeQuestion(rawText) {
   const text = chatText(rawText);
   return /(ai dang tra loi|ai tu van|bot ha|robot ha|co phai ai|may tra loi|nguoi hay may|bac si nao|gio lam viec|may gio dong cua|may gio mo cua|buoi le|cam ket khoi|co khoi khong|massage thu gian|mat xa thu gian|bao hanh|chac khoi)/.test(text);
@@ -967,7 +977,7 @@ function detectCustomerIntent(rawText, state) {
   if (isBranchChoice(rawText) || detectAreaHint(rawText)) return state.assessmentSent || state.priceSent ? "branch_for_booking" : "area_or_branch";
   if (isSpecificDiseaseQuestion(rawText)) return "specific_disease";
   if (isMethodQuestion(rawText)) return "method";
-  if (isPing(rawText)) return "open_consult";
+  if (isOpenConsultation(rawText)) return "open_consult";
   if (detectDisease(rawText)) return "known_disease";
   if (detectPain(rawText)) return "symptom";
   return "answer_followup";
@@ -1776,7 +1786,7 @@ function handleDeterministicFlow(senderId, customerText) {
     return result(state, "Dạ không sao ạ, khi nào mình sắp xếp được em giữ ưu đãi phù hợp cho mình nhé.");
   }
 
-  if (isPing(customerText)) {
+  if (isOpenConsultation(customerText)) {
     if (state.lastQuestion === "duration") return askDuration(state);
     if (state.lastQuestion === "trigger") return askTrigger(state);
     if (state.lastQuestion === "radiation") return askRadiation(state);
@@ -2442,6 +2452,21 @@ async function agenticReviewReply(chatKey, customerText, candidateReply, source 
   const candidateMessages = Array.isArray(candidateReply.messages) ? candidateReply.messages : [candidateReply.message].filter(Boolean);
   const candidateText = candidateMessages.join("\n").trim();
   if (!candidateText) return handoff("agentic reviewer: empty candidate");
+  const normalizedCustomerText = chatText(customerText);
+  const normalizedCandidateText = chatText(candidateText);
+  if (
+    isOpenConsultation(customerText) &&
+    !state.pain &&
+    !state.disease &&
+    /(dang dau|dau moi|phan nao|vung nao)/.test(normalizedCandidateText)
+  ) {
+    console.log("Agentic reviewer bypass: safe open consultation", {
+      chatKey,
+      customerText: normalizedCustomerText,
+      candidateText: normalizedCandidateText,
+    });
+    return responseGuard(state, candidateReply);
+  }
 
   const reviewerPayload = {
     task: "review_before_send",
@@ -2471,6 +2496,7 @@ async function agenticReviewReply(chatKey, customerText, candidateReply, source 
       "Khong gui cau lap y/cau lap lai.",
       "Doc y khach vua nhan truoc: neu khach hoi gia/dia chi/lich thi phai xu ly dung y do, khong quay ve hoi trieu chung.",
       "Neu khach hoi 2 y trong 1 tin thi phai xu ly du cac y quan trong.",
+      "Neu khach chi mo dau bang tu van/tv/xin tu van/chao/alo va bot chi hoi dau-moi phan nao thi cho REPLY, khong HANDOFF.",
       "Khong chan doan sai vung: lung khong thanh goi/hang/tay; co-vai-gay khong thanh goi/hang/lung; tay/ngon tay khong hoi di lai/hang/goi.",
       "Tu 'thang' la thoi gian, khong duoc hieu thanh 'hang'.",
       "Khach noi dau khop ma chua ro khop nao thi chi hoi: Da minh dau khop nao a?",
